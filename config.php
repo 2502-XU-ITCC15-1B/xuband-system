@@ -10,111 +10,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!isOfficer()) { http_response_code(403); exit; }
     $action = $_POST['action'] ?? '';
 
-    if ($action === 'create_school_year') {
-        $label = trim($_POST['label'] ?? '');
-        if (!$label) { flash('error', 'School year label required.'); redirect('/scholarships.php'); }
-        $exists = dbQueryOne('SELECT id FROM school_years WHERE label = ?', [$label]);
-        if ($exists) { flash('error', 'School year already exists.'); redirect('/scholarships.php'); }
-        $sy_id = dbInsert('INSERT INTO school_years (label, created_by) VALUES (?,?)', [$label, $user['id']]);
-        foreach (['1st Semester','2nd Semester','Intersession'] as $term) {
-            dbInsert('INSERT INTO scholarship_terms (school_year_id, term) VALUES (?,?)', [$sy_id, $term]);
-        }
-        flash('success', "School year $label created with 3 terms.");
-        redirect('/scholarships.php');
+    if ($action === 'create') {
+        $title   = trim($_POST['title'] ?? '');
+        $body    = trim($_POST['body'] ?? '');
+        $pinned  = isset($_POST['pinned']) ? 1 : 0;
+        $expires = $_POST['expires_at'] ?: null;
+        if (!$title || !$body) { flash('error', 'Title and body are required.'); redirect('/announcements.php'); }
+        dbInsert('INSERT INTO announcements (title,body,created_by,pinned,expires_at) VALUES (?,?,?,?,?)',
+            [$title, $body, $user['id'], $pinned, $expires]);
+        flash('success', 'Announcement posted.');
+        redirect('/announcements.php');
     }
 
-    if ($action === 'delete_school_year') {
+    if ($action === 'update') {
+        $id     = (int)($_POST['id'] ?? 0);
+        $title  = trim($_POST['title'] ?? '');
+        $body   = trim($_POST['body'] ?? '');
+        $pinned = isset($_POST['pinned']) ? 1 : 0;
+        $expires= $_POST['expires_at'] ?: null;
+        if (!$title || !$body) { flash('error', 'Title and body are required.'); redirect('/announcements.php'); }
+        dbExecute('UPDATE announcements SET title=?,body=?,pinned=?,expires_at=?,updated_at=NOW() WHERE id=?',
+            [$title, $body, $pinned, $expires, $id]);
+        flash('success', 'Announcement updated.');
+        redirect('/announcements.php');
+    }
+
+    if ($action === 'delete') {
         $id = (int)($_POST['id'] ?? 0);
-        dbExecute('DELETE FROM school_years WHERE id = ?', [$id]);
-        flash('success', 'School year deleted.');
-        redirect('/scholarships.php');
-    }
-
-    if ($action === 'batch_update') {
-        // Batch update all scholarship statuses for a term at once
-        $term_id  = (int)($_POST['term_id'] ?? 0);
-        $statuses = $_POST['status'] ?? []; // [user_id => status]
-        $scholarship_ids = $_POST['scholarship_id'] ?? []; // [user_id => scholarship_id]
-        $allowed = ['Full Scholar','Half Scholar','Not Scholar'];
-        foreach ($statuses as $uid => $status) {
-            $uid = (int)$uid;
-            $sid = (int)($scholarship_ids[$uid] ?? 0);
-            if (!in_array($status, $allowed)) continue;
-            if ($sid > 0) {
-                dbExecute('UPDATE scholarships SET status=?,updated_by=?,updated_at=NOW() WHERE id=?',
-                    [$status, $user['id'], $sid]);
-            } else {
-                dbExecute('INSERT INTO scholarships (term_id,user_id,status,updated_by) VALUES (?,?,?,?)
-                           ON DUPLICATE KEY UPDATE status=VALUES(status),updated_by=VALUES(updated_by),updated_at=NOW()',
-                    [$term_id, $uid, $status, $user['id']]);
-            }
-        }
-        flash('success', 'Scholarship statuses saved.');
-        redirect('/scholarships.php');
-    }
-
-    if ($action === 'update_status') {
-        // Keep single-update fallback for compatibility
-        $scholarship_id = (int)($_POST['scholarship_id'] ?? 0);
-        $term_id        = (int)($_POST['term_id'] ?? 0);
-        $uid            = (int)($_POST['user_id'] ?? 0);
-        $status         = $_POST['status'] ?? 'Not Scholar';
-        $allowed = ['Full Scholar','Half Scholar','Not Scholar'];
-        if (!in_array($status, $allowed)) { flash('error', 'Invalid status.'); redirect('/scholarships.php'); }
-
-        if ($scholarship_id) {
-            dbExecute('UPDATE scholarships SET status=?,updated_by=?,updated_at=NOW() WHERE id=?',
-                [$status, $user['id'], $scholarship_id]);
-        } else {
-            dbExecute('INSERT INTO scholarships (term_id,user_id,status,updated_by) VALUES (?,?,?,?)
-                       ON DUPLICATE KEY UPDATE status=VALUES(status),updated_by=VALUES(updated_by),updated_at=NOW()',
-                [$term_id, $uid, $status, $user['id']]);
-        }
-        flash('success', 'Scholarship status updated.');
-        redirect('/scholarships.php');
+        dbExecute('DELETE FROM announcements WHERE id = ?', [$id]);
+        flash('success', 'Announcement deleted.');
+        redirect('/announcements.php');
     }
 }
 
-$schoolYears = dbQuery('SELECT sy.*, u.name AS creator FROM school_years sy JOIN users u ON u.id=sy.created_by ORDER BY sy.label DESC');
+$announcements = dbQuery('SELECT a.*, u.name AS author FROM announcements a JOIN users u ON u.id = a.created_by ORDER BY a.pinned DESC, a.created_at DESC');
 
-$yearsData = [];
-foreach ($schoolYears as $sy) {
-    $terms = dbQuery(
-        'SELECT * FROM scholarship_terms WHERE school_year_id=? ORDER BY FIELD(term,"1st Semester","2nd Semester","Intersession")',
-        [$sy['id']]
-    );
-    $termsData = [];
-    foreach ($terms as $t) {
-        if (isOfficer()) {
-            $records = dbQuery(
-                'SELECT u.id AS user_id, u.name, u.instrument, u.year_level,
-                    COALESCE(s.id,0) AS scholarship_id,
-                    COALESCE(s.status,"Not Scholar") AS status,
-                    ub.name AS updated_by_name, s.updated_at
-                 FROM users u
-                 LEFT JOIN scholarships s ON s.user_id=u.id AND s.term_id=?
-                 LEFT JOIN users ub ON ub.id=s.updated_by
-                 WHERE u.role="member" AND u.status="active"
-                 ORDER BY u.name',
-                [$t['id']]
-            );
-        } else {
-            $records = dbQuery(
-                'SELECT u.id AS user_id, u.name,
-                    COALESCE(s.id,0) AS scholarship_id,
-                    COALESCE(s.status,"Not Scholar") AS status
-                 FROM users u
-                 LEFT JOIN scholarships s ON s.user_id=u.id AND s.term_id=?
-                 WHERE u.id=?',
-                [$t['id'], $user['id']]
-            );
-        }
-        $termsData[] = ['term' => $t, 'records' => $records];
-    }
-    $yearsData[] = ['sy' => $sy, 'terms' => $termsData];
-}
-
-layout_head('Scholarships', 'scholarships');
+layout_head('Announcements', 'announcements');
 ?>
 
 <?php if ($e = getFlash('error')): ?>
@@ -128,175 +59,115 @@ layout_head('Scholarships', 'scholarships');
 </div>
 <?php endif; ?>
 
-<div class="d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4">
-  <h2 class="mb-0" style="color:var(--navy)"><i class="bi bi-award me-2"></i>Scholarship Records</h2>
-  <?php if (isOfficer()): ?>
-  <button class="btn btn-primary btn-sm" onclick="openModal('xumodalSY')">
-    <i class="bi bi-plus-lg me-1"></i> Create School Year
-  </button>
-  <?php else: ?>
-  <div class="alert alert-info mb-0 py-2 px-3 small d-flex align-items-center gap-2">
-    <i class="bi bi-info-circle-fill"></i> Showing your scholarship status only.
-  </div>
-  <?php endif; ?>
-</div>
-
-<?php if (!$yearsData): ?>
 <div class="card">
-  <div class="empty-state p-5">
-    <div class="empty-icon"><i class="bi bi-award"></i></div>
-    <p><?= isOfficer() ? 'No school years yet. Create one above.' : 'No scholarship records yet.' ?></p>
-  </div>
-</div>
-<?php endif; ?>
-
-<!-- Bootstrap Accordion -->
-<div class="accordion" id="scholarshipAccordion">
-<?php foreach ($yearsData as $yi => $yd): $sy = $yd['sy']; $syId = 'sy-' . $sy['id']; ?>
-
-<div class="accordion-item mb-3 border rounded shadow-sm">
-  <h2 class="accordion-header">
-    <button class="accordion-button collapsed fw-bold" type="button"
-            data-bs-toggle="collapse" data-bs-target="#collapse-<?= $syId ?>"
-            aria-expanded="false" aria-controls="collapse-<?= $syId ?>">
-      <i class="bi bi-calendar-range me-2"></i>
-      <?= h($sy['label']) ?>
-      <span class="ms-2 text-muted fw-normal small">3 terms</span>
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span class="card-title"><i class="bi bi-megaphone me-2"></i>Announcements</span>
+    <?php if (isOfficer()): ?>
+    <button class="btn btn-primary btn-sm" onclick="openModal('xumodalAnn'); resetAnnForm()">
+      <i class="bi bi-plus-lg me-1"></i> Post Announcement
     </button>
-  </h2>
-  <div id="collapse-<?= $syId ?>" class="accordion-collapse collapse">
-    <div class="accordion-body p-0">
-
-      <?php if (isOfficer()): ?>
-      <div class="px-3 py-2 border-bottom d-flex justify-content-end">
-        <form method="POST" style="display:inline">
-          <input type="hidden" name="action" value="delete_school_year">
-          <input type="hidden" name="id" value="<?= $sy['id'] ?>">
-          <button class="btn btn-xs btn-danger" data-confirm="Delete school year <?= h($sy['label']) ?>?">
-            <i class="bi bi-trash me-1"></i>Delete Year
-          </button>
-        </form>
-      </div>
-      <?php endif; ?>
-
-      <!-- Nested accordion for terms -->
-      <div class="accordion accordion-flush" id="termAccordion-<?= $sy['id'] ?>">
-        <?php foreach ($yd['terms'] as $tdi => $td): $t = $td['term']; $records = $td['records']; $termId = 'term-' . $t['id']; ?>
-        <div class="accordion-item">
-          <h2 class="accordion-header">
-            <button class="accordion-button collapsed py-2 fw-semibold" type="button"
-                    data-bs-toggle="collapse" data-bs-target="#collapse-<?= $termId ?>"
-                    aria-expanded="false" aria-controls="collapse-<?= $termId ?>"
-                    style="background:var(--bg);color:var(--navy);font-size:.9rem">
-              <i class="bi bi-calendar-check me-2"></i>
-              <?= h($t['term']) ?>
-              <span class="ms-2 text-muted fw-normal small">(<?= count($records) ?> member<?= count($records)!=1?'s':'' ?>)</span>
-            </button>
-          </h2>
-          <div id="collapse-<?= $termId ?>" class="accordion-collapse collapse">
-            <div class="accordion-body p-0">
-              <?php if (!$records): ?>
-              <div class="empty-state p-3"><p>No members found.</p></div>
-              <?php elseif (isOfficer()): ?>
-              <!-- Officer: batch form per term -->
-              <form method="POST">
-                <input type="hidden" name="action" value="batch_update">
-                <input type="hidden" name="term_id" value="<?= $t['id'] ?>">
-                <div class="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Member</th>
-                        <th>Instrument</th><th>Year</th>
-                        <th>Scholarship Status</th>
-                        <th>Updated By</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <?php foreach ($records as $r): ?>
-                      <tr>
-                        <input type="hidden" name="scholarship_id[<?= $r['user_id'] ?>]" value="<?= $r['scholarship_id'] ?>">
-                        <td><strong><?= h($r['name']) ?></strong></td>
-                        <td><?= h($r['instrument']??'—') ?></td>
-                        <td class="small text-muted"><?= h($r['year_level']??'—') ?></td>
-                        <td>
-                          <select name="status[<?= $r['user_id'] ?>]" class="form-control" style="width:145px">
-                            <option value="Full Scholar"  <?= $r['status']==='Full Scholar' ?'selected':'' ?>>Full Scholar</option>
-                            <option value="Half Scholar"  <?= $r['status']==='Half Scholar' ?'selected':'' ?>>Half Scholar</option>
-                            <option value="Not Scholar"   <?= $r['status']==='Not Scholar'  ?'selected':'' ?>>Not Scholar</option>
-                          </select>
-                        </td>
-                        <td class="small text-muted"><?= h($r['updated_by_name']??'—') ?></td>
-                      </tr>
-                      <?php endforeach; ?>
-                    </tbody>
-                  </table>
-                </div>
-                <div class="p-3 border-top">
-                  <button type="submit" class="btn btn-primary btn-sm">
-                    <i class="bi bi-floppy me-1"></i>Save Changes
-                  </button>
-                </div>
-              </form>
-              <?php else: ?>
-              <!-- Member: read-only view -->
-              <div class="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Member</th>
-                      <th>Scholarship Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <?php foreach ($records as $r): ?>
-                    <tr>
-                      <td><strong><?= h($r['name']) ?></strong></td>
-                      <td><?= scholarshipBadge($r['status']) ?></td>
-                    </tr>
-                    <?php endforeach; ?>
-                  </tbody>
-                </table>
-              </div>
-              <?php endif; ?>
-            </div>
-          </div>
-        </div>
-        <?php endforeach; ?>
-      </div>
-
-    </div>
+    <?php endif; ?>
   </div>
-</div>
-
-<?php endforeach; ?>
+  <div class="card-body p-3">
+    <?php if (!$announcements): ?>
+    <div class="empty-state"><div class="empty-icon"><i class="bi bi-inbox"></i></div><p>No announcements yet.</p></div>
+    <?php else: foreach ($announcements as $ann):
+      $expired = $ann['expires_at'] && strtotime($ann['expires_at']) < strtotime('today');
+    ?>
+    <div class="announcement-card <?= $ann['pinned'] ? 'pinned' : '' ?>" <?= $expired ? 'style="opacity:.55"' : '' ?>>
+      <div class="d-flex align-items-center justify-content-between flex-wrap gap-2 mb-2">
+        <div class="d-flex align-items-center gap-2">
+          <?php if ($ann['pinned']): ?>
+          <span class="badge text-bg-warning" style="font-size:.7rem">
+            <i class="bi bi-pin-angle-fill me-1"></i>PINNED
+          </span>
+          <?php endif; ?>
+          <?php if ($expired): ?><span class="badge text-bg-secondary">Expired</span><?php endif; ?>
+        </div>
+        <?php if (isOfficer()): ?>
+        <div class="d-flex gap-2">
+          <button class="btn btn-xs btn-outline" onclick="openModal('xumodalAnn'); fillAnn(<?= htmlspecialchars(json_encode($ann), ENT_QUOTES) ?>)">
+            <i class="bi bi-pencil"></i> Edit
+          </button>
+          <form method="POST" style="display:inline">
+            <input type="hidden" name="action" value="delete">
+            <input type="hidden" name="id" value="<?= $ann['id'] ?>">
+            <button class="btn btn-xs btn-danger" data-confirm="Delete this announcement?">
+              <i class="bi bi-trash"></i> Delete
+            </button>
+          </form>
+        </div>
+        <?php endif; ?>
+      </div>
+      <h3 style="color:var(--navy);margin-bottom:6px"><?= h($ann['title']) ?></h3>
+      <p style="color:var(--text);line-height:1.7;white-space:pre-line"><?= h($ann['body']) ?></p>
+      <div class="text-muted" style="font-size:.75rem;margin-top:6px">
+        <i class="bi bi-person me-1"></i><?= h($ann['author']) ?>
+        &nbsp;&middot;&nbsp;
+        <i class="bi bi-clock me-1"></i><?= formatDateTime($ann['created_at']) ?>
+        <?= $ann['expires_at'] ? ' &nbsp;&middot;&nbsp; Expires ' . formatDate($ann['expires_at']) : '' ?>
+      </div>
+    </div>
+    <?php endforeach; endif; ?>
+  </div>
 </div>
 
 <?php if (isOfficer()): ?>
-<div class="xu-modal-overlay" id="xumodalSY">
-  <div class="xu-modal">
+<div class="xu-modal-overlay" id="xumodalAnn">
+  <div class="xu-modal" style="max-width:640px">
     <div class="xu-modal-header">
-      <span class="xu-modal-title">Create School Year</span>
+      <span class="xu-modal-title" id="annModalTitle">Post Announcement</span>
       <button class="xu-modal-close" onclick="closeModal(this)"><i class="bi bi-x-lg"></i></button>
     </div>
     <form method="POST">
-      <input type="hidden" name="action" value="create_school_year">
+      <input type="hidden" name="action" id="ann_action" value="create">
+      <input type="hidden" name="id"     id="ann_id"     value="">
       <div class="xu-modal-body">
         <div class="mb-3">
-          <label class="form-label">School Year Label *</label>
-          <input name="label" class="form-control" placeholder="e.g. 2024-2025" required>
-          <div class="form-text text-muted">Auto-creates 1st Semester, 2nd Semester, and Intersession terms.</div>
+          <label class="form-label">Title *</label>
+          <input id="ann_title" name="title" class="form-control" required>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Body *</label>
+          <textarea id="ann_body" name="body" class="form-control" rows="6" required></textarea>
+        </div>
+        <div class="row g-3">
+          <div class="col-md-6">
+            <label class="form-label">Expiry Date (optional)</label>
+            <input id="ann_expires" name="expires_at" type="date" class="form-control">
+          </div>
+          <div class="col-md-6 d-flex align-items-end pb-1">
+            <div class="form-check">
+              <input id="ann_pinned" name="pinned" type="checkbox" class="form-check-input">
+              <label class="form-check-label" for="ann_pinned">Pin this announcement</label>
+            </div>
+          </div>
         </div>
       </div>
       <div class="xu-modal-footer">
         <button type="button" class="btn btn-outline" onclick="closeModal(this)">Cancel</button>
-        <button type="submit" class="btn btn-primary">
-          <i class="bi bi-plus-lg me-1"></i>Create
-        </button>
+        <button type="submit" class="btn btn-primary">Post</button>
       </div>
     </form>
   </div>
 </div>
+<script>
+function resetAnnForm() {
+  document.getElementById('ann_action').value = 'create';
+  document.getElementById('annModalTitle').textContent = 'Post Announcement';
+  ['id','title','body','expires'].forEach(k => { const el = document.getElementById('ann_'+k); if(el) el.value=''; });
+  document.getElementById('ann_pinned').checked = false;
+}
+function fillAnn(a) {
+  document.getElementById('ann_action').value = 'update';
+  document.getElementById('annModalTitle').textContent = 'Edit Announcement';
+  document.getElementById('ann_id').value      = a.id;
+  document.getElementById('ann_title').value   = a.title;
+  document.getElementById('ann_body').value    = a.body;
+  document.getElementById('ann_expires').value = a.expires_at || '';
+  document.getElementById('ann_pinned').checked = a.pinned == 1;
+}
+</script>
 <?php endif; ?>
 
 <?php layout_foot(); ?>

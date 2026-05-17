@@ -6,254 +6,389 @@ require_once __DIR__ . '/../includes/layout.php';
 requireLogin();
 $user = currentUser();
 
-// Stats
-$totalMembers    = dbQueryOne('SELECT COUNT(*) AS n FROM users WHERE role = "member"')['n'] ?? 0;
-$totalOfficers   = dbQueryOne('SELECT COUNT(*) AS n FROM users WHERE role IN ("officer","moderator")')['n'] ?? 0;
-$totalSheets     = dbQueryOne('SELECT COUNT(*) AS n FROM music_sheets')['n'] ?? 0;
-$upcomingEvents  = dbQueryOne('SELECT COUNT(*) AS n FROM events WHERE event_date >= CURDATE()')['n'] ?? 0;
-// Fix: status values are Full Scholar / Half Scholar / Not Scholar — count non-"Not Scholar"
-$activeScholar   = dbQueryOne('SELECT COUNT(*) AS n FROM scholarships WHERE status != "Not Scholar"')['n'] ?? 0;
-$announcements   = dbQuery('SELECT a.*, u.name AS author FROM announcements a JOIN users u ON u.id = a.created_by ORDER BY a.pinned DESC, a.created_at DESC LIMIT 5');
-$nextEvents      = dbQuery('SELECT e.*, u.name AS organizer FROM events e JOIN users u ON u.id = e.created_by WHERE e.event_date >= CURDATE() ORDER BY e.event_date ASC LIMIT 5');
+// ── POST handlers (officers/moderators only) ──────────────────────
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!isOfficer()) { http_response_code(403); exit; }
+    $action = $_POST['action'] ?? '';
 
-// My attendance (for members)
-$myStats = null;
-if ($user['role'] === 'member') {
-    $myStats = dbQueryOne('SELECT ps.total_points,
-        (SELECT COUNT(*) FROM attendance WHERE user_id = ? AND status = "present") AS presents,
-        (SELECT COUNT(*) FROM attendance WHERE user_id = ? AND status = "absent") AS absents
-        FROM penalty_summary ps WHERE ps.user_id = ?',
-        [$user['id'], $user['id'], $user['id']]);
-    $myScholarship = dbQueryOne('SELECT * FROM scholarships WHERE user_id = ? ORDER BY id DESC LIMIT 1', [$user['id']]);
+    if ($action === 'create_folder') {
+        $name = trim($_POST['name'] ?? '');
+        $desc = trim($_POST['description'] ?? '');
+        if (!$name) { flash('error', 'Folder name is required.'); redirect('/music-sheets.php'); }
+        dbInsert('INSERT INTO music_folders (name,description,created_by) VALUES (?,?,?)', [$name,$desc,$user['id']]);
+        flash('success', "Folder \"$name\" created.");
+        redirect('/music-sheets.php');
+    }
+
+    if ($action === 'delete_folder') {
+        $id = (int)($_POST['id'] ?? 0);
+        $files = dbQuery('SELECT file_path FROM music_sheets WHERE folder_id = ?', [$id]);
+        foreach ($files as $f) { $p = __DIR__ . '/' . $f['file_path']; if (file_exists($p)) @unlink($p); }
+        dbExecute('DELETE FROM music_folders WHERE id = ?', [$id]);
+        flash('success', 'Folder deleted.');
+        redirect('/music-sheets.php');
+    }
+
+    if ($action === 'upload_file') {
+        $folder_id  = (int)($_POST['folder_id'] ?? 0);
+        $title      = trim($_POST['title'] ?? '');
+        $instrument = trim($_POST['instrument'] ?? '');
+        if (!$folder_id || !$title) { flash('error', 'Folder and title are required.'); redirect('/music-sheets.php?folder=' . $folder_id); }
+        if (empty($_FILES['file']['name'])) { flash('error', 'Please select a file.'); redirect('/music-sheets.php?folder=' . $folder_id); }
+
+        $upload = uploadFile($_FILES['file'], 'music-sheets');
+        if (!$upload['ok']) { flash('error', $upload['error']); redirect('/music-sheets.php?folder=' . $folder_id); }
+
+        $sheet_id = dbInsert('INSERT INTO music_sheets (folder_id,title,instrument,file_path,file_name,file_size,file_type,uploaded_by) VALUES (?,?,?,?,?,?,?,?)',
+            [$folder_id,$title,$instrument,$upload['path'],$upload['filename'],$upload['size'],$upload['mime'],$user['id']]);
+
+        $members = dbQuery('SELECT id FROM users WHERE role="member" AND status="active"');
+        foreach ($members as $m) {
+            dbExecute('INSERT IGNORE INTO music_assignments (sheet_id,user_id,assigned_by) VALUES (?,?,?)',
+                [$sheet_id, $m['id'], $user['id']]);
+        }
+
+        flash('success', "File \"$title\" uploaded.");
+        redirect('/music-sheets.php?folder=' . $folder_id);
+    }
+
+    if ($action === 'delete_file') {
+        $id        = (int)($_POST['id'] ?? 0);
+        $folder_id = (int)($_POST['folder_id'] ?? 0);
+        $sheet = dbQueryOne('SELECT * FROM music_sheets WHERE id = ?', [$id]);
+        if ($sheet) {
+            $p = __DIR__ . '/' . $sheet['file_path'];
+            if (file_exists($p)) @unlink($p);
+            dbExecute('DELETE FROM music_sheets WHERE id = ?', [$id]);
+        }
+        flash('success', 'File deleted.');
+        redirect('/music-sheets.php?folder=' . $folder_id);
+    }
+
+    if ($action === 'save_assignments') {
+        $sheet_id  = (int)($_POST['sheet_id'] ?? 0);
+        $folder_id = (int)($_POST['folder_id'] ?? 0);
+        $assigned  = $_POST['assigned'] ?? [];
+        dbExecute('DELETE FROM music_assignments WHERE sheet_id = ?', [$sheet_id]);
+        foreach ($assigned as $uid) {
+            dbExecute('INSERT IGNORE INTO music_assignments (sheet_id,user_id,assigned_by) VALUES (?,?,?)',
+                [$sheet_id, (int)$uid, $user['id']]);
+        }
+        flash('success', 'Assignments saved.');
+        redirect('/music-sheets.php?folder=' . $folder_id);
+    }
 }
 
-layout_head('Dashboard', 'dashboard');
-?>
+// ── View ──────────────────────────────────────────────────────────
+$folderId = (int)($_GET['folder'] ?? 0);
 
+if ($folderId) {
+    $folder = dbQueryOne('SELECT * FROM music_folders WHERE id = ?', [$folderId]);
+    if (!$folder) { flash('error', 'Folder not found.'); redirect('/music-sheets.php'); }
+
+    if (isOfficer()) {
+        $sheets = dbQuery('SELECT ms.*, u.name AS uploader FROM music_sheets ms JOIN users u ON u.id = ms.uploaded_by WHERE ms.folder_id = ? ORDER BY ms.created_at DESC', [$folderId]);
+    } else {
+        $sheets = dbQuery('SELECT ms.*, u.name AS uploader FROM music_sheets ms JOIN users u ON u.id = ms.uploaded_by JOIN music_assignments ma ON ma.sheet_id = ms.id WHERE ms.folder_id = ? AND ma.user_id = ? ORDER BY ms.created_at DESC', [$folderId, $user['id']]);
+    }
+    $allMembers = isOfficer() ? dbQuery('SELECT id,name,instrument FROM users WHERE role="member" AND status="active" ORDER BY name') : [];
+
+    layout_head('Music Sheets — ' . $folder['name'], 'music-sheets');
+    ?>
+
+<?php if ($e = getFlash('error')): ?>
+<div class="alert alert-danger d-flex align-items-center gap-2" data-auto-dismiss>
+  <i class="bi bi-exclamation-triangle-fill"></i> <?= h($e) ?>
+</div>
+<?php endif; ?>
 <?php if ($s = getFlash('success')): ?>
 <div class="alert alert-success d-flex align-items-center gap-2" data-auto-dismiss>
   <i class="bi bi-check-circle-fill"></i> <?= h($s) ?>
 </div>
 <?php endif; ?>
 
-<!-- Stats -->
-<div class="stats-grid">
-  <?php if (isOfficer()): ?>
-  <a href="/members.php" class="stat-card stat-card-link" style="text-decoration:none">
-    <div class="stat-icon"><i class="bi bi-people"></i></div>
-    <div><div class="stat-value"><?= $totalMembers ?></div><div class="stat-label">Band Members</div></div>
+<div class="d-flex align-items-center gap-3 mb-4">
+  <a href="/music-sheets.php" class="btn btn-outline btn-sm">
+    <i class="bi bi-arrow-left me-1"></i> Back to Folders
   </a>
-  <a href="/music-sheets.php" class="stat-card stat-card-link" style="text-decoration:none">
-    <div class="stat-icon"><i class="bi bi-music-note-beamed"></i></div>
-    <div><div class="stat-value"><?= $totalSheets ?></div><div class="stat-label">Music Sheets</div></div>
-  </a>
-  <a href="/scholarships.php" class="stat-card stat-card-link" style="text-decoration:none">
-    <div class="stat-icon gold"><i class="bi bi-award"></i></div>
-    <div><div class="stat-value"><?= $activeScholar ?></div><div class="stat-label">Active Scholars</div></div>
-  </a>
-  <a href="/events.php" class="stat-card stat-card-link" style="text-decoration:none">
-    <div class="stat-icon"><i class="bi bi-calendar3"></i></div>
-    <div><div class="stat-value"><?= $upcomingEvents ?></div><div class="stat-label">Upcoming Events</div></div>
-  </a>
+  <h2 class="mb-0" style="color:var(--navy)">
+    <i class="bi bi-folder2-open me-2"></i><?= h($folder['name']) ?>
+  </h2>
+  <?php if ($folder['description']): ?>
+  <span class="text-muted small"><?= h($folder['description']) ?></span>
+  <?php endif; ?>
+</div>
+
+<?php if (!isOfficer()): ?>
+<div class="alert alert-info d-flex align-items-center gap-2">
+  <i class="bi bi-info-circle-fill"></i> Showing only your assigned music sheets.
+</div>
+<?php endif; ?>
+
+<div class="card">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span class="card-title"><i class="bi bi-music-note-beamed me-2"></i>Files in this folder</span>
+    <?php if (isOfficer()): ?>
+    <button class="btn btn-primary btn-sm" onclick="openModal('xumodalUpload')">
+      <i class="bi bi-upload me-1"></i> Upload File
+    </button>
+    <?php endif; ?>
+  </div>
+  <?php if (!$sheets): ?>
+  <div class="empty-state">
+    <div class="empty-icon"><i class="bi bi-music-note-beamed"></i></div>
+    <p><?= isOfficer() ? 'No files uploaded yet.' : 'No sheets assigned to you yet.' ?></p>
+  </div>
   <?php else: ?>
-  <a href="/attendance.php" class="stat-card stat-card-link" style="text-decoration:none">
-    <div class="stat-icon"><i class="bi bi-check2-circle"></i></div>
-    <div><div class="stat-value"><?= $myStats['presents'] ?? 0 ?></div><div class="stat-label">Times Present</div></div>
-  </a>
-  <a href="/attendance.php" class="stat-card stat-card-link" style="text-decoration:none">
-    <div class="stat-icon"><i class="bi bi-x-circle"></i></div>
-    <div><div class="stat-value"><?= $myStats['absents'] ?? 0 ?></div><div class="stat-label">Absences</div></div>
-  </a>
-  <a href="/attendance.php" class="stat-card stat-card-link" style="text-decoration:none">
-    <div class="stat-icon gold"><i class="bi bi-exclamation-triangle"></i></div>
-    <div>
-      <div class="stat-value <?= penaltyColor((float)($myStats['total_points'] ?? 0)) ?>"><?= $myStats['total_points'] ?? 0 ?></div>
-      <div class="stat-label">Penalty Points</div>
-    </div>
-  </a>
-  <?php if (isset($myScholarship)): ?>
-  <a href="/scholarships.php" class="stat-card stat-card-link" style="text-decoration:none">
-    <div class="stat-icon"><i class="bi bi-award"></i></div>
-    <div>
-      <div class="stat-value" style="font-size:1.1rem"><?= ucfirst($myScholarship['status'] ?? '—') ?></div>
-      <div class="stat-label">Scholarship Status</div>
-    </div>
-  </a>
-  <?php endif; ?>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Title</th><th>Instrument</th><th>File</th>
+          <th>Uploaded by</th><th>Date</th><th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <?php foreach ($sheets as $sh):
+          $ext  = strtolower(pathinfo($sh['file_name'], PATHINFO_EXTENSION));
+          $icon = match($ext) {
+            'pdf'                    => 'bi-file-pdf text-danger',
+            'mp3'                    => 'bi-file-music text-primary',
+            'jpg','jpeg','png','gif' => 'bi-file-image text-success',
+            default                  => 'bi-file-earmark'
+          };
+          $size = $sh['file_size'] ? round($sh['file_size']/1024,1).' KB' : '';
+        ?>
+        <tr>
+          <td><strong><?= h($sh['title']) ?></strong></td>
+          <td><?= $sh['instrument'] ? '<span class="badge badge-member">'.h($sh['instrument']).'</span>' : '<span class="text-muted">—</span>' ?></td>
+          <td>
+            <i class="bi <?= $icon ?>"></i>
+            <span class="small ms-1"><?= h($sh['file_name']) ?><?= $size ? " · $size" : '' ?></span>
+          </td>
+          <td class="small text-muted"><?= h($sh['uploader']) ?></td>
+          <td class="small text-muted"><?= formatDate($sh['created_at']) ?></td>
+          <td>
+            <a href="/<?= h($sh['file_path']) ?>" download="<?= h($sh['file_name']) ?>" class="btn btn-gold btn-xs">
+              <i class="bi bi-download me-1"></i>Download
+            </a>
+            <?php if (isOfficer()): ?>
+            <button class="btn btn-xs btn-outline" onclick="openModal('xumodalAssign'); loadAssignments(<?= $sh['id'] ?>, <?= $folderId ?>, '<?= h(addslashes($sh['title'])) ?>')">
+              <i class="bi bi-people"></i> Assign
+            </button>
+            <form method="POST" style="display:inline">
+              <input type="hidden" name="action" value="delete_file">
+              <input type="hidden" name="id" value="<?= $sh['id'] ?>">
+              <input type="hidden" name="folder_id" value="<?= $folderId ?>">
+              <button class="btn btn-xs btn-danger" data-confirm="Delete this file?">
+                <i class="bi bi-trash"></i>
+              </button>
+            </form>
+            <?php endif; ?>
+          </td>
+        </tr>
+        <?php endforeach; ?>
+      </tbody>
+    </table>
+  </div>
   <?php endif; ?>
 </div>
 
-<div class="row g-3">
-
-  <!-- Announcements -->
-  <div class="col-md-6">
-    <div class="card h-100">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <span class="card-title"><i class="bi bi-megaphone me-2"></i>Latest Announcements</span>
-        <a href="/announcements.php" class="btn btn-sm btn-outline">View All</a>
-      </div>
-      <div class="card-body p-0">
-        <?php if (!$announcements): ?>
-        <div class="empty-state"><div class="empty-icon"><i class="bi bi-inbox"></i></div><p>No announcements yet.</p></div>
-        <?php else: foreach ($announcements as $ann):
-          $annJson = htmlspecialchars(json_encode($ann), ENT_QUOTES);
-        ?>
-        <div class="px-3 py-3 border-bottom dashboard-row-link"
-             style="cursor:pointer"
-             onclick="dashViewAnn(<?= $annJson ?>)"
-             role="button" tabindex="0">
-          <div class="d-flex align-items-center gap-2 mb-1">
-            <?php if ($ann['pinned']): ?><span class="badge text-bg-warning" style="font-size:.65rem">PINNED</span><?php endif; ?>
-            <span class="text-muted" style="font-size:.75rem"><?= formatDate($ann['created_at']) ?></span>
-          </div>
-          <div class="fw-bold" style="color:var(--xu-navy)"><?= h($ann['title']) ?></div>
-          <div class="text-muted small mt-1"><?= h(mb_substr($ann['body'], 0, 100)) ?>…</div>
-        </div>
-        <?php endforeach; endif; ?>
-      </div>
-    </div>
-  </div>
-
-  <!-- Upcoming Events -->
-  <div class="col-md-6">
-    <div class="card h-100">
-      <div class="card-header d-flex justify-content-between align-items-center">
-        <span class="card-title"><i class="bi bi-calendar3 me-2"></i>Upcoming Events</span>
-        <a href="/events.php" class="btn btn-sm btn-outline">View Calendar</a>
-      </div>
-      <div class="card-body p-0">
-        <?php if (!$nextEvents): ?>
-        <div class="empty-state"><div class="empty-icon"><i class="bi bi-calendar-x"></i></div><p>No upcoming events.</p></div>
-        <?php else: foreach ($nextEvents as $ev):
-          $evJson = htmlspecialchars(json_encode($ev), ENT_QUOTES);
-        ?>
-        <div class="px-3 py-3 border-bottom dashboard-row-link d-flex gap-3 align-items-start"
-             style="cursor:pointer"
-             onclick="dashViewEvent(<?= $evJson ?>)"
-             role="button" tabindex="0">
-          <div class="text-center flex-shrink-0"
-               style="min-width:44px;background:var(--xu-navy);color:#fff;border-radius:8px;padding:6px 4px">
-            <div style="font-size:.65rem;font-weight:700;text-transform:uppercase;opacity:.7"><?= (new DateTime($ev['event_date']))->format('M') ?></div>
-            <div style="font-size:1.2rem;font-weight:800;line-height:1"><?= (new DateTime($ev['event_date']))->format('d') ?></div>
-          </div>
-          <div>
-            <div class="fw-bold" style="color:var(--xu-navy)"><?= h($ev['title']) ?></div>
-            <div class="text-muted small"><?= h($ev['location'] ?? '') ?><?= $ev['event_time'] ? ' · ' . date('h:i A', strtotime($ev['event_time'])) : '' ?></div>
-            <span class="badge badge-member mt-1"><?= h(ucfirst($ev['type'])) ?></span>
-          </div>
-        </div>
-        <?php endforeach; endif; ?>
-      </div>
-    </div>
-  </div>
-
-</div>
-
-<!-- Dashboard: Announcement View Modal -->
-<div class="xu-modal-overlay" id="xumodalDashAnn">
-  <div class="xu-modal" style="max-width:640px">
+<?php if (isOfficer()): ?>
+<!-- Upload Modal -->
+<div class="xu-modal-overlay" id="xumodalUpload">
+  <div class="xu-modal">
     <div class="xu-modal-header">
-      <span class="xu-modal-title" id="dashAnnTitle">Announcement</span>
+      <span class="xu-modal-title">Upload File to <?= h($folder['name']) ?></span>
       <button class="xu-modal-close" onclick="closeModal(this)"><i class="bi bi-x-lg"></i></button>
     </div>
-    <div class="xu-modal-body" style="max-height:65vh;overflow-y:auto">
-      <div id="dashAnnPinBadge" class="mb-2" style="display:none">
-        <span class="badge text-bg-warning"><i class="bi bi-pin-angle-fill me-1"></i>PINNED</span>
+    <form method="POST" enctype="multipart/form-data">
+      <input type="hidden" name="action" value="upload_file">
+      <input type="hidden" name="folder_id" value="<?= $folderId ?>">
+      <div class="xu-modal-body">
+        <div class="mb-3">
+          <label class="form-label">File *</label>
+          <input name="file" type="file" class="form-control" accept=".pdf,.jpg,.jpeg,.png,.gif,.mp3" required>
+          <div class="form-text text-muted">PDF, JPG, PNG, GIF, MP3 (max 20MB). Auto-assigned to all active members.</div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Title *</label>
+          <input name="title" class="form-control" required>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Instrument</label>
+          <input name="instrument" class="form-control" placeholder="e.g. Trumpet, Saxophone, Flute…">
+        </div>
       </div>
-      <p id="dashAnnBody" style="white-space:pre-line;line-height:1.8;color:var(--xu-text);font-size:.93rem"></p>
-      <hr>
-      <div class="text-muted d-flex align-items-center gap-2 flex-wrap" style="font-size:.8rem">
-        <span><i class="bi bi-person me-1"></i><span id="dashAnnAuthor"></span></span>
-        <span>&middot;</span>
-        <span><i class="bi bi-clock me-1"></i><span id="dashAnnDate"></span></span>
+      <div class="xu-modal-footer">
+        <button type="button" class="btn btn-outline" onclick="closeModal(this)">Cancel</button>
+        <button type="submit" class="btn btn-primary"><i class="bi bi-upload me-1"></i>Upload</button>
       </div>
-    </div>
-    <div class="xu-modal-footer">
-      <a href="/announcements.php" class="btn btn-outline-secondary btn-sm me-auto">
-        <i class="bi bi-arrow-right me-1"></i>View All Announcements
-      </a>
-      <button type="button" class="btn btn-outline" onclick="closeModal(this)">Close</button>
-    </div>
+    </form>
   </div>
 </div>
 
-<!-- Dashboard: Event View Modal -->
-<div class="xu-modal-overlay" id="xumodalDashEvent">
-  <div class="xu-modal" style="max-width:520px">
+<!-- Assign Modal -->
+<div class="xu-modal-overlay" id="xumodalAssign">
+  <div class="xu-modal">
     <div class="xu-modal-header">
-      <span class="xu-modal-title" id="dashEvTitle">Event Details</span>
+      <span class="xu-modal-title" id="assignTitle">Manage Assignments</span>
       <button class="xu-modal-close" onclick="closeModal(this)"><i class="bi bi-x-lg"></i></button>
     </div>
-    <div class="xu-modal-body">
-      <div class="mb-3"><span id="dashEvTypeBadge" class="badge bg-secondary"></span></div>
-      <div class="row g-3">
-        <div class="col-6">
-          <div class="text-muted small">Date</div>
-          <div class="fw-bold" id="dashEvDate"></div>
-        </div>
-        <div class="col-6">
-          <div class="text-muted small">Time</div>
-          <div class="fw-bold" id="dashEvTime"></div>
-        </div>
-        <div class="col-6">
-          <div class="text-muted small">Location</div>
-          <div class="fw-bold" id="dashEvLocation"></div>
-        </div>
-        <div class="col-6">
-          <div class="text-muted small">Organizer</div>
-          <div class="fw-bold" id="dashEvOrganizer"></div>
+    <form method="POST" id="assignForm">
+      <input type="hidden" name="action" value="save_assignments">
+      <input type="hidden" name="sheet_id" id="assign_sheet_id" value="">
+      <input type="hidden" name="folder_id" id="assign_folder_id" value="">
+      <div class="xu-modal-body">
+        <p class="small text-muted mb-3">Select which members can see and download this sheet:</p>
+        <div id="assignMemberList">
+          <?php foreach ($allMembers as $m): ?>
+          <div class="d-flex align-items-center gap-2 py-2 border-bottom">
+            <input type="checkbox" name="assigned[]" value="<?= $m['id'] ?>"
+              class="form-check-input member-assign-cb" data-uid="<?= $m['id'] ?>">
+            <span><?= h($m['name']) ?></span>
+            <?php if ($m['instrument']): ?><span class="badge badge-member"><?= h($m['instrument']) ?></span><?php endif; ?>
+          </div>
+          <?php endforeach; ?>
         </div>
       </div>
-      <div id="dashEvDescWrap" class="mt-3" style="display:none">
-        <div class="text-muted small mb-1">Description</div>
-        <p id="dashEvDesc" style="white-space:pre-line;line-height:1.7"></p>
+      <div class="modal-footer gap-2">
+        <button type="button" class="btn btn-outline btn-sm" onclick="toggleAllAssign(true)">Select All</button>
+        <button type="button" class="btn btn-outline btn-sm" onclick="toggleAllAssign(false)">None</button>
+        <button type="button" class="btn btn-outline" onclick="closeModal(this)">Cancel</button>
+        <button type="submit" class="btn btn-primary">Save</button>
       </div>
-    </div>
-    <div class="xu-modal-footer">
-      <a href="/events.php" class="btn btn-outline-secondary btn-sm me-auto">
-        <i class="bi bi-calendar3 me-1"></i>View Calendar
-      </a>
-      <button type="button" class="btn btn-outline" onclick="closeModal(this)">Close</button>
-    </div>
+    </form>
   </div>
 </div>
 
 <script>
-function dashViewAnn(a) {
-  document.getElementById('dashAnnTitle').textContent  = a.title;
-  document.getElementById('dashAnnBody').textContent   = a.body;
-  document.getElementById('dashAnnAuthor').textContent = a.author || '';
-  document.getElementById('dashAnnDate').textContent   = a.created_at || '';
-  document.getElementById('dashAnnPinBadge').style.display = a.pinned == 1 ? '' : 'none';
-  openModal('xumodalDashAnn');
-}
-function dashViewEvent(e) {
-  document.getElementById('dashEvTitle').textContent    = e.title;
-  document.getElementById('dashEvTypeBadge').textContent = (e.type||'').charAt(0).toUpperCase() + (e.type||'').slice(1);
-  document.getElementById('dashEvDate').textContent     = e.event_date || '—';
-  document.getElementById('dashEvTime').textContent     = e.event_time ? dashFmtTime(e.event_time) : '—';
-  document.getElementById('dashEvLocation').textContent = e.location || '—';
-  document.getElementById('dashEvOrganizer').textContent = e.organizer || '—';
-  var dw = document.getElementById('dashEvDescWrap');
-  var dd = document.getElementById('dashEvDesc');
-  if (e.description) { dd.textContent = e.description; dw.style.display = ''; }
-  else { dw.style.display = 'none'; }
-  openModal('xumodalDashEvent');
-}
-function dashFmtTime(t) {
-  if (!t) return '—';
-  var p = t.split(':'), h = parseInt(p[0]), m = p[1];
-  var ampm = h >= 12 ? 'PM' : 'AM';
-  h = h % 12 || 12;
-  return h + ':' + m + ' ' + ampm;
-}
-document.addEventListener('DOMContentLoaded', function() {
-  document.querySelectorAll('[role=button]').forEach(function(el) {
-    el.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.click(); }
+function loadAssignments(sheetId, folderId, title) {
+  document.getElementById('assign_sheet_id').value  = sheetId;
+  document.getElementById('assign_folder_id').value = folderId;
+  document.getElementById('assignTitle').textContent = 'Assign: ' + title;
+  fetch('/api/assignments.php?sheet_id=' + sheetId)
+    .then(r => r.json())
+    .then(data => {
+      document.querySelectorAll('.member-assign-cb').forEach(cb => {
+        cb.checked = data.includes(parseInt(cb.dataset.uid));
+      });
     });
-  });
-});
+}
+function toggleAllAssign(val) {
+  document.querySelectorAll('.member-assign-cb').forEach(cb => cb.checked = val);
+}
 </script>
+<?php endif; ?>
+
+<?php
+
+} else {
+    // Folder listing
+    if (isOfficer()) {
+        $folders = dbQuery('SELECT f.*, u.name AS creator, COUNT(ms.id) AS file_count FROM music_folders f JOIN users u ON u.id = f.created_by LEFT JOIN music_sheets ms ON ms.folder_id = f.id GROUP BY f.id ORDER BY f.created_at DESC');
+    } else {
+        $folders = dbQuery('SELECT DISTINCT f.*, u.name AS creator, (SELECT COUNT(DISTINCT ms2.id) FROM music_sheets ms2 JOIN music_assignments ma2 ON ma2.sheet_id=ms2.id WHERE ms2.folder_id=f.id AND ma2.user_id=?) AS file_count FROM music_folders f JOIN users u ON u.id=f.created_by JOIN music_sheets ms ON ms.folder_id=f.id JOIN music_assignments ma ON ma.sheet_id=ms.id WHERE ma.user_id=? ORDER BY f.created_at DESC', [$user['id'],$user['id']]);
+    }
+
+    layout_head('Music Sheets', 'music-sheets');
+    ?>
+
+<?php if ($e = getFlash('error')): ?>
+<div class="alert alert-danger d-flex align-items-center gap-2" data-auto-dismiss>
+  <i class="bi bi-exclamation-triangle-fill"></i> <?= h($e) ?>
+</div>
+<?php endif; ?>
+<?php if ($s = getFlash('success')): ?>
+<div class="alert alert-success d-flex align-items-center gap-2" data-auto-dismiss>
+  <i class="bi bi-check-circle-fill"></i> <?= h($s) ?>
+</div>
+<?php endif; ?>
+
+<?php if (!isOfficer()): ?>
+<div class="alert alert-info d-flex align-items-center gap-2">
+  <i class="bi bi-info-circle-fill"></i> Showing folders that contain sheets assigned to you.
+</div>
+<?php endif; ?>
+
+<div class="card">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <span class="card-title"><i class="bi bi-music-note-beamed me-2"></i>Music Sheet Library</span>
+    <?php if (isOfficer()): ?>
+    <button class="btn btn-primary btn-sm" onclick="openModal('xumodalFolder')">
+      <i class="bi bi-folder-plus me-1"></i> New Folder
+    </button>
+    <?php endif; ?>
+  </div>
+  <div class="card-body p-3">
+    <?php if (!$folders): ?>
+    <div class="empty-state">
+      <div class="empty-icon"><i class="bi bi-folder2"></i></div>
+      <p><?= isOfficer() ? 'No folders yet. Create one to start uploading music sheets.' : 'No music sheets assigned to you yet.' ?></p>
+    </div>
+    <?php else: ?>
+    <div class="row g-3">
+      <?php foreach ($folders as $f): ?>
+      <div class="col-sm-6 col-md-4 col-lg-3">
+        <div class="folder-card" onclick="window.location='/music-sheets.php?folder=<?= $f['id'] ?>'">
+          <i class="bi bi-folder2-open folder-icon"></i>
+          <div class="fw-bold" style="color:var(--navy);margin-bottom:4px"><?= h($f['name']) ?></div>
+          <?php if ($f['description']): ?>
+          <div class="small text-muted mb-2"><?= h(mb_substr($f['description'],0,60)) ?></div>
+          <?php endif; ?>
+          <div class="text-muted" style="font-size:.75rem">
+            <i class="bi bi-file-earmark me-1"></i><?= $f['file_count'] ?> file<?= $f['file_count']!=1?'s':'' ?>
+            &nbsp;&middot;&nbsp;<?= h($f['creator']) ?>
+          </div>
+          <?php if (isOfficer()): ?>
+          <div class="mt-2" onclick="event.stopPropagation()">
+            <form method="POST" style="display:inline">
+              <input type="hidden" name="action" value="delete_folder">
+              <input type="hidden" name="id" value="<?= $f['id'] ?>">
+              <button class="btn btn-xs btn-danger" data-confirm="Delete folder and all files inside?">
+                <i class="bi bi-trash me-1"></i>Delete
+              </button>
+            </form>
+          </div>
+          <?php endif; ?>
+        </div>
+      </div>
+      <?php endforeach; ?>
+    </div>
+    <?php endif; ?>
+  </div>
+</div>
+
+<?php if (isOfficer()): ?>
+<div class="xu-modal-overlay" id="xumodalFolder">
+  <div class="xu-modal">
+    <div class="xu-modal-header">
+      <span class="xu-modal-title">Create Folder</span>
+      <button class="xu-modal-close" onclick="closeModal(this)"><i class="bi bi-x-lg"></i></button>
+    </div>
+    <form method="POST">
+      <input type="hidden" name="action" value="create_folder">
+      <div class="xu-modal-body">
+        <div class="mb-3">
+          <label class="form-label">Folder Name *</label>
+          <input name="name" class="form-control" placeholder="e.g. ABBA Medley, Competition 2025…" required>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Description</label>
+          <textarea name="description" class="form-control" rows="2"></textarea>
+        </div>
+      </div>
+      <div class="xu-modal-footer">
+        <button type="button" class="btn btn-outline" onclick="closeModal(this)">Cancel</button>
+        <button type="submit" class="btn btn-primary">
+          <i class="bi bi-folder-plus me-1"></i>Create Folder
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+<?php endif; ?>
+
+<?php } ?>
 
 <?php layout_foot(); ?>

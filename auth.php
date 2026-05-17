@@ -7,55 +7,54 @@ requireLogin();
 $user = currentUser();
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    if (!isOfficer()) { http_response_code(403); exit; }
     $action = $_POST['action'] ?? '';
 
-    if ($action === 'create') {
-        $title   = trim($_POST['title'] ?? '');
-        $body    = trim($_POST['body'] ?? '');
-        $pinned  = isset($_POST['pinned']) ? 1 : 0;
-        $expires = $_POST['expires_at'] ?: null;
-        if (!$title || !$body) { flash('error', 'Title and body are required.'); redirect('/announcements.php'); }
-        dbInsert('INSERT INTO announcements (title,body,created_by,pinned,expires_at) VALUES (?,?,?,?,?)',
-            [$title, $body, $user['id'], $pinned, $expires]);
-        flash('success', 'Announcement posted.');
-        redirect('/announcements.php');
+    if ($action === 'update_profile') {
+        $name    = trim($_POST['name'] ?? '');
+        $instr   = trim($_POST['instrument'] ?? '');
+        $yr      = trim($_POST['year_level'] ?? '');
+        $contact = trim($_POST['contact_number'] ?? '');
+        $notes   = trim($_POST['profile_notes'] ?? '');
+        if (!$name) { flash('error', 'Name is required.'); redirect('/profile.php'); }
+        dbExecute('UPDATE users SET name=?,instrument=?,year_level=?,contact_number=?,profile_notes=? WHERE id=?',
+            [$name,$instr,$yr,$contact,$notes,$user['id']]);
+        $_SESSION['user_name'] = $name;
+        flash('success', 'Profile updated.');
+        redirect('/profile.php');
     }
 
-    if ($action === 'update') {
-        $id      = (int)($_POST['id'] ?? 0);
-        $title   = trim($_POST['title'] ?? '');
-        $body    = trim($_POST['body'] ?? '');
-        $pinned  = isset($_POST['pinned']) ? 1 : 0;
-        $expires = $_POST['expires_at'] ?: null;
-        if (!$title || !$body) { flash('error', 'Title and body are required.'); redirect('/announcements.php'); }
-        dbExecute('UPDATE announcements SET title=?,body=?,pinned=?,expires_at=?,updated_at=NOW() WHERE id=?',
-            [$title, $body, $pinned, $expires, $id]);
-        flash('success', 'Announcement updated.');
-        redirect('/announcements.php');
-    }
-
-    if ($action === 'delete') {
-        $id = (int)($_POST['del_id'] ?? $_POST['id'] ?? 0);
-        dbExecute('DELETE FROM announcements WHERE id = ?', [$id]);
-        flash('success', 'Announcement deleted.');
-        redirect('/announcements.php');
-    }
-
-    if ($action === 'bulk_delete') {
-        $ids = array_map('intval', $_POST['ids'] ?? []);
-        if ($ids) {
-            $placeholders = implode(',', array_fill(0, count($ids), '?'));
-            dbExecute("DELETE FROM announcements WHERE id IN ($placeholders)", $ids);
-            flash('success', count($ids) . ' announcement(s) deleted.');
+    if ($action === 'change_password') {
+        $current = $_POST['current_password'] ?? '';
+        $new     = $_POST['new_password'] ?? '';
+        $confirm = $_POST['confirm_password'] ?? '';
+        $dbUser  = dbQueryOne('SELECT password_hash FROM users WHERE id = ?', [$user['id']]);
+        if (!password_verify($current, $dbUser['password_hash'])) {
+            flash('error', 'Current password is incorrect.');
+        } elseif (strlen($new) < 6) {
+            flash('error', 'New password must be at least 6 characters.');
+        } elseif ($new !== $confirm) {
+            flash('error', 'Passwords do not match.');
+        } else {
+            dbExecute('UPDATE users SET password_hash=? WHERE id=?', [password_hash($new, PASSWORD_BCRYPT), $user['id']]);
+            flash('success', 'Password changed.');
         }
-        redirect('/announcements.php');
+        redirect('/profile.php');
     }
 }
 
-$announcements = dbQuery('SELECT a.*, u.name AS author FROM announcements a JOIN users u ON u.id = a.created_by ORDER BY a.pinned DESC, a.created_at DESC');
+$profile       = dbQueryOne('SELECT * FROM users WHERE id = ?', [$user['id']]);
+$myScholarship = dbQueryOne(
+    'SELECT s.*, st.term, sy.label AS year_label
+     FROM scholarships s
+     JOIN scholarship_terms st ON st.id = s.term_id
+     JOIN school_years sy ON sy.id = st.school_year_id
+     WHERE s.user_id = ? ORDER BY s.id DESC LIMIT 1',
+    [$user['id']]
+);
+$myAttendance  = dbQuery('SELECT a.*, e.title AS event_title, e.event_date, e.type FROM attendance a JOIN events e ON e.id = a.event_id WHERE a.user_id = ? ORDER BY e.event_date DESC LIMIT 10', [$user['id']]);
+$myPenalty     = dbQueryOne('SELECT * FROM penalty_summary WHERE user_id = ?', [$user['id']]);
 
-layout_head('Announcements', 'announcements');
+layout_head('My Profile', 'profile');
 ?>
 
 <?php if ($e = getFlash('error')): ?>
@@ -69,233 +68,183 @@ layout_head('Announcements', 'announcements');
 </div>
 <?php endif; ?>
 
-<div class="card">
-  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-    <span class="card-title"><i class="bi bi-megaphone me-2"></i>Announcements</span>
-    <?php if (isOfficer()): ?>
-    <div class="d-flex gap-2" id="annHeaderBtns">
-      <button type="button" class="btn btn-sm btn-outline-secondary d-none" id="annSelectAllBtn"
-        onclick="annToggleAll()">
-        <i class="bi bi-check-all me-1"></i>Select All
-      </button>
-      <button class="btn btn-sm btn-outline-danger d-none" id="bulkDeleteBtn"
-        onclick="bulkDelete('announcements')">
-        <i class="bi bi-trash me-1"></i>Delete Selected (<span id="bulkCount">0</span>)
-      </button>
-      <button class="btn btn-primary btn-sm" onclick="openModal('xumodalAnn'); resetAnnForm()">
-        <i class="bi bi-plus-lg me-1"></i> Post Announcement
-      </button>
-    </div>
-    <?php endif; ?>
-  </div>
-  <div class="card-body p-3" style="display:flex;flex-direction:column;gap:0">
-    <?php if (!$announcements): ?>
-    <div class="empty-state"><div class="empty-icon"><i class="bi bi-inbox"></i></div><p>No announcements yet.</p></div>
-    <?php else: ?>
-    <form method="POST" id="bulkForm-announcements">
-      <input type="hidden" name="action" value="bulk_delete">
-      <input type="hidden" name="del_id" value="" id="annDelId">
-      <?php foreach ($announcements as $ann):
-        $expired = $ann['expires_at'] && strtotime($ann['expires_at']) < strtotime('today');
-        $annJson = htmlspecialchars(json_encode($ann), ENT_QUOTES);
-      ?>
-      <div class="ann-card <?= $ann['pinned'] ? 'pinned' : '' ?>"
-           <?= $expired ? 'style="opacity:.55"' : '' ?>
-           onclick="viewAnn(<?= $annJson ?>)"
-           role="button" tabindex="0">
-        <div class="d-flex align-items-start justify-content-between flex-wrap gap-2 mb-2" onclick="event.stopPropagation()">
-          <div class="d-flex align-items-center gap-2">
-            <?php if (isOfficer()): ?>
-            <input type="checkbox" name="ids[]" value="<?= $ann['id'] ?>"
-              class="form-check-input bulk-cb" onchange="updateBulkCount('announcements')"
-              style="margin-top:2px" onclick="event.stopPropagation()">
-            <?php endif; ?>
-            <?php if ($ann['pinned']): ?>
-            <span class="badge text-bg-warning" style="font-size:.7rem">
-              <i class="bi bi-pin-angle-fill me-1"></i>PINNED
-            </span>
-            <?php endif; ?>
-            <?php if ($expired): ?><span class="badge text-bg-secondary">Expired</span><?php endif; ?>
-          </div>
-          <?php if (isOfficer()): ?>
-          <div class="d-flex gap-2" onclick="event.stopPropagation()">
-            <button type="button" class="btn btn-sm btn-outline-secondary"
-              onclick="openModal('xumodalAnn'); fillAnn(<?= $annJson ?>)">
-              <i class="bi bi-pencil me-1"></i>Edit
-            </button>
-            <button type="button" class="btn btn-sm btn-outline-danger"
-              onclick="annDelete(<?= $ann['id'] ?>)">
-              <i class="bi bi-trash me-1"></i>Delete
-            </button>
-          </div>
-          <?php endif; ?>
-        </div>
-        <h3 style="color:var(--xu-navy);margin-bottom:6px"><?= h($ann['title']) ?></h3>
-        <p style="color:var(--text);line-height:1.7;white-space:pre-line;
-           display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden">
-          <?= h($ann['body']) ?>
-        </p>
-        <div class="text-muted d-flex align-items-center gap-1 flex-wrap" style="font-size:.75rem;margin-top:6px">
-          <i class="bi bi-person"></i><?= h($ann['author']) ?>
-          <span>&middot;</span>
-          <i class="bi bi-clock"></i><?= formatDateTime($ann['created_at']) ?>
-          <?= $ann['expires_at'] ? '<span>&middot;</span> Expires ' . formatDate($ann['expires_at']) : '' ?>
-          <span class="ms-auto text-primary" style="font-size:.75rem"><i class="bi bi-arrows-angle-expand me-1"></i>Click to read more</span>
-        </div>
-      </div>
-      <?php endforeach; ?>
-    </form>
-    <?php endif; ?>
-  </div>
-</div>
+<div class="row g-3 align-items-start">
 
-<!-- View Announcement Modal (all users) -->
-<div class="xu-modal-overlay" id="xumodalAnnView">
-  <div class="xu-modal" style="max-width:680px">
-    <div class="xu-modal-header">
-      <span class="xu-modal-title" id="annViewTitle">Announcement</span>
-      <button class="xu-modal-close" onclick="closeModal(this)"><i class="bi bi-x-lg"></i></button>
-    </div>
-    <div class="xu-modal-body" style="max-height:70vh;overflow-y:auto">
-      <div id="annViewPinBadge" class="mb-2" style="display:none">
-        <span class="badge text-bg-warning"><i class="bi bi-pin-angle-fill me-1"></i>PINNED</span>
-      </div>
-      <div id="annViewExpiredBadge" class="mb-2" style="display:none">
-        <span class="badge text-bg-secondary">Expired</span>
-      </div>
-      <p id="annViewBody" style="white-space:pre-line;line-height:1.8;color:var(--text);font-size:.93rem"></p>
-      <hr>
-      <div class="text-muted d-flex align-items-center gap-2 flex-wrap" style="font-size:.8rem">
-        <span><i class="bi bi-person me-1"></i><span id="annViewAuthor"></span></span>
-        <span>&middot;</span>
-        <span><i class="bi bi-clock me-1"></i><span id="annViewDate"></span></span>
-        <span id="annViewExpiry"></span>
-      </div>
-    </div>
-    <div class="xu-modal-footer">
-      <button type="button" class="btn btn-outline-secondary" onclick="closeModal(this)">Close</button>
-    </div>
-  </div>
-</div>
-
-<?php if (isOfficer()): ?>
-<!-- Create/Edit Modal -->
-<div class="xu-modal-overlay" id="xumodalAnn">
-  <div class="xu-modal" style="max-width:640px">
-    <div class="xu-modal-header">
-      <span class="xu-modal-title" id="annModalTitle">Post Announcement</span>
-      <button class="xu-modal-close" onclick="closeModal(this)"><i class="bi bi-x-lg"></i></button>
+<!-- Left: Profile Info + Password -->
+<div class="col-lg-4">
+  <div class="card mb-3">
+    <div class="card-header">
+      <span class="card-title"><i class="bi bi-person me-2"></i>Profile Information</span>
     </div>
     <form method="POST">
-      <input type="hidden" name="action" id="ann_action" value="create">
-      <input type="hidden" name="id"     id="ann_id"     value="">
-      <div class="xu-modal-body">
-        <div class="mb-3">
-          <label class="form-label">Title *</label>
-          <input id="ann_title" name="title" class="form-control" required>
+      <input type="hidden" name="action" value="update_profile">
+      <div class="card-body">
+        <div class="text-center mb-3">
+          <div class="user-avatar mx-auto mb-2" style="width:60px;height:60px;font-size:1.5rem">
+            <?= strtoupper(substr($profile['name'],0,1)) ?>
+          </div>
+          <?= roleBadge($profile['role']) ?>
         </div>
         <div class="mb-3">
-          <label class="form-label">Body *</label>
-          <textarea id="ann_body" name="body" class="form-control" rows="6" required></textarea>
+          <label class="form-label">Full Name *</label>
+          <input name="name" class="form-control" value="<?= h($profile['name']) ?>" required>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Email</label>
+          <input class="form-control" value="<?= h($profile['email']) ?>" disabled>
         </div>
         <div class="row g-3">
-          <div class="col-md-6">
-            <label class="form-label">Expiry Date (optional)</label>
-            <input id="ann_expires" name="expires_at" type="date" class="form-control">
+          <div class="col-6">
+            <label class="form-label">Instrument</label>
+            <input name="instrument" class="form-control" value="<?= h($profile['instrument'] ?? '') ?>">
           </div>
-          <div class="col-md-6 d-flex align-items-end pb-1">
-            <div class="form-check">
-              <input id="ann_pinned" name="pinned" type="checkbox" class="form-check-input">
-              <label class="form-check-label" for="ann_pinned">Pin this announcement</label>
-            </div>
+          <div class="col-6">
+            <label class="form-label">Year Level</label>
+            <input name="year_level" class="form-control" value="<?= h($profile['year_level'] ?? '') ?>">
           </div>
         </div>
+        <div class="mt-3">
+          <label class="form-label">Contact Number</label>
+          <input name="contact_number" class="form-control" value="<?= h($profile['contact_number'] ?? '') ?>">
+        </div>
+        <div class="mt-3">
+          <label class="form-label">Notes</label>
+          <textarea name="profile_notes" class="form-control"><?= h($profile['profile_notes'] ?? '') ?></textarea>
+        </div>
+        <div class="text-muted small mt-2">
+          Student ID: <?= h($profile['student_id'] ?: '—') ?> &middot; Joined <?= formatDate($profile['created_at']) ?>
+        </div>
       </div>
-      <div class="xu-modal-footer">
-        <button type="button" class="btn btn-outline-secondary" onclick="closeModal(this)">Cancel</button>
-        <button type="submit" class="btn btn-primary">Post</button>
+      <div class="card-footer">
+        <button type="submit" class="btn btn-primary">
+          <i class="bi bi-floppy me-1"></i>Save Changes
+        </button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="bi bi-key me-2"></i>Change Password</span>
+    </div>
+    <form method="POST">
+      <input type="hidden" name="action" value="change_password">
+      <div class="card-body">
+        <div class="mb-3">
+          <label class="form-label">Current Password</label>
+          <input name="current_password" type="password" class="form-control" required>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">New Password</label>
+          <input name="new_password" type="password" class="form-control" required>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Confirm Password</label>
+          <input name="confirm_password" type="password" class="form-control" required>
+        </div>
+      </div>
+      <div class="card-footer">
+        <button type="submit" class="btn btn-gold">
+          <i class="bi bi-shield-lock me-1"></i>Change Password
+        </button>
       </div>
     </form>
   </div>
 </div>
-<?php endif; ?>
 
-<script>
-function viewAnn(a) {
-  var today = new Date(); today.setHours(0,0,0,0);
-  var expired = a.expires_at && new Date(a.expires_at) < today;
-  document.getElementById('annViewTitle').textContent = a.title;
-  document.getElementById('annViewBody').textContent  = a.body;
-  document.getElementById('annViewAuthor').textContent = a.author || '';
-  document.getElementById('annViewDate').textContent   = a.created_at || '';
-  document.getElementById('annViewPinBadge').style.display  = a.pinned == 1 ? '' : 'none';
-  document.getElementById('annViewExpiredBadge').style.display = expired ? '' : 'none';
-  var expEl = document.getElementById('annViewExpiry');
-  expEl.textContent = a.expires_at ? ' · Expires ' + a.expires_at : '';
-  openModal('xumodalAnnView');
-}
-function resetAnnForm() {
-  document.getElementById('ann_action').value = 'create';
-  document.getElementById('annModalTitle').textContent = 'Post Announcement';
-  ['id','title','body','expires'].forEach(k => { const el = document.getElementById('ann_'+k); if(el) el.value=''; });
-  document.getElementById('ann_pinned').checked = false;
-}
-function fillAnn(a) {
-  document.getElementById('ann_action').value = 'update';
-  document.getElementById('annModalTitle').textContent = 'Edit Announcement';
-  document.getElementById('ann_id').value      = a.id;
-  document.getElementById('ann_title').value   = a.title;
-  document.getElementById('ann_body').value    = a.body;
-  document.getElementById('ann_expires').value = a.expires_at || '';
-  document.getElementById('ann_pinned').checked = a.pinned == 1;
-}
-function annDelete(id) {
-  if (!confirm('Delete this announcement?')) return;
-  var form = document.getElementById('bulkForm-announcements');
-  form.querySelector('[name=action]').value = 'delete';
-  document.getElementById('annDelId').value = id;
-  form.submit();
-}
-function updateBulkCount(scope) {
-  var checked = document.querySelectorAll('#bulkForm-' + scope + ' .bulk-cb:checked').length;
-  var btn = document.getElementById('bulkDeleteBtn');
-  var selBtn = document.getElementById('annSelectAllBtn');
-  document.getElementById('bulkCount').textContent = checked;
-  btn.classList.toggle('d-none', checked === 0);
-  if (selBtn) selBtn.classList.toggle('d-none', false);
-}
-function bulkDelete(scope) {
-  var checked = document.querySelectorAll('#bulkForm-' + scope + ' .bulk-cb:checked').length;
-  if (!checked) return;
-  if (!confirm('Delete ' + checked + ' selected announcement(s)?')) return;
-  var form = document.getElementById('bulkForm-' + scope);
-  form.querySelector('[name=action]').value = 'bulk_delete';
-  form.submit();
-}
-function annToggleAll() {
-  var cbs = document.querySelectorAll('#bulkForm-announcements .bulk-cb');
-  var allChecked = [...cbs].every(c => c.checked);
-  cbs.forEach(c => c.checked = !allChecked);
-  updateBulkCount('announcements');
-  var btn = document.getElementById('annSelectAllBtn');
-  if (btn) btn.innerHTML = allChecked
-    ? '<i class="bi bi-check-all me-1"></i>Select All'
-    : '<i class="bi bi-x-circle me-1"></i>Deselect All';
-}
-document.addEventListener('DOMContentLoaded', function() {
-  <?php if (isOfficer()): ?>
-  var selBtn = document.getElementById('annSelectAllBtn');
-  if (selBtn && document.querySelectorAll('.bulk-cb').length > 0) {
-    selBtn.classList.remove('d-none');
-  }
+<!-- Right: Stats + Attendance -->
+<div class="col-lg-8">
+  <?php if ($profile['role'] === 'member'): ?>
+
+  <?php if ($myScholarship): ?>
+  <div class="card mb-3">
+    <div class="card-header">
+      <span class="card-title"><i class="bi bi-award me-2"></i>My Scholarship</span>
+    </div>
+    <div class="card-body">
+      <div class="row g-3">
+        <div class="col-6">
+          <div class="text-muted small">Status</div>
+          <?= scholarshipBadge($myScholarship['status']) ?>
+        </div>
+        <div class="col-6">
+          <div class="text-muted small">Semester</div>
+          <div class="fw-bold"><?= h($myScholarship['term'] ?? '—') ?></div>
+        </div>
+        <div class="col-6">
+          <div class="text-muted small">School Year</div>
+          <div class="fw-bold"><?= h($myScholarship['year_label'] ?? '—') ?></div>
+        </div>
+        <div class="col-6">
+          <div class="text-muted small">Last Updated</div>
+          <div class="fw-bold"><?= $myScholarship['updated_at'] ? formatDate($myScholarship['updated_at']) : '—' ?></div>
+        </div>
+      </div>
+    </div>
+  </div>
   <?php endif; ?>
-  // Keyboard accessibility for announcement cards
-  document.querySelectorAll('.ann-card[role=button]').forEach(function(card) {
-    card.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); card.click(); }
-    });
-  });
-});
-</script>
+
+  <!-- Penalty Summary -->
+  <div class="card mb-3">
+    <div class="card-header">
+      <span class="card-title"><i class="bi bi-clipboard-check me-2"></i>My Attendance &amp; Penalties</span>
+    </div>
+    <div class="card-body">
+      <div class="row g-3 mb-3 text-center">
+        <div class="col-4">
+          <div class="p-2 rounded" style="background:var(--bg)">
+            <div class="fw-bold" style="font-size:1.5rem;color:var(--green)">
+              <?= dbQueryOne('SELECT COUNT(*) AS n FROM attendance WHERE user_id=? AND status="present"',[$user['id']])['n']??0 ?>
+            </div>
+            <div class="text-muted small">Present</div>
+          </div>
+        </div>
+        <div class="col-4">
+          <div class="p-2 rounded" style="background:var(--bg)">
+            <div class="fw-bold" style="font-size:1.5rem;color:var(--red)">
+              <?= dbQueryOne('SELECT COUNT(*) AS n FROM attendance WHERE user_id=? AND status="absent"',[$user['id']])['n']??0 ?>
+            </div>
+            <div class="text-muted small">Absent</div>
+          </div>
+        </div>
+        <div class="col-4">
+          <div class="p-2 rounded" style="background:var(--bg)">
+            <div class="fw-bold <?= penaltyColor((float)($myPenalty['total_points']??0)) ?>" style="font-size:1.5rem">
+              <?= $myPenalty['total_points'] ?? 0 ?>
+            </div>
+            <div class="text-muted small">Penalty Pts</div>
+          </div>
+        </div>
+      </div>
+
+      <h6 class="mb-2">Recent Attendance</h6>
+      <?php if (!$myAttendance): ?>
+      <p class="text-muted small">No records yet.</p>
+      <?php else: ?>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Event</th><th>Date</th><th>Status</th><th>Penalty</th></tr>
+          </thead>
+          <tbody>
+            <?php foreach ($myAttendance as $a): ?>
+            <tr>
+              <td><?= h($a['event_title']) ?></td>
+              <td class="small"><?= formatDate($a['event_date']) ?></td>
+              <td><?= statusBadge($a['att_status'] ?? $a['status']) ?></td>
+              <td class="<?= penaltyColor((float)$a['penalty_points']) ?> fw-bold"><?= $a['penalty_points'] ?></td>
+            </tr>
+            <?php endforeach; ?>
+          </tbody>
+        </table>
+      </div>
+      <?php endif; ?>
+    </div>
+  </div>
+
+  <?php endif; ?>
+</div>
+
+</div>
 
 <?php layout_foot(); ?>

@@ -1,86 +1,27 @@
 <?php
-require_once __DIR__ . '/../includes/auth.php';
-require_once __DIR__ . '/../includes/db.php';
-require_once __DIR__ . '/../includes/helpers.php';
-require_once __DIR__ . '/../includes/layout.php';
-requireLogin();
-$user = currentUser();
+// XUBand Configuration
+define('APP_NAME', 'XUBand Filing System');
+define('APP_VERSION', '1.0.0');
+define('APP_URL', getenv('APP_URL') ?: '');
 
-// Moderators have their own Members Management page
-// This page is for Band Members & Officers to see the member list (no moderators shown)
-$members = dbQuery(
-    'SELECT u.id, u.name, u.role, u.instrument, u.year_level, u.student_id,
-            u.status, u.avatar_path, u.contact_number,
-            COALESCE(ps.total_points,0) AS penalty_points
-     FROM users u
-     LEFT JOIN penalty_summary ps ON ps.user_id = u.id
-     WHERE u.role != "moderator" AND u.status = "active"
-     ORDER BY u.role ASC, u.name ASC'
-);
+// Database config from environment variables (Railway injects these)
+define('DB_HOST', getenv('MYSQLHOST')     ?: getenv('DB_HOST') ?: '');
+define('DB_PORT', getenv('MYSQLPORT')     ?: getenv('DB_PORT') ?: '3306');
+define('DB_NAME', getenv('MYSQLDATABASE') ?: getenv('MYSQL_DATABASE') ?: getenv('DB_NAME') ?: 'railway');
+define('DB_USER', getenv('MYSQLUSER')     ?: getenv('DB_USER') ?: '');
+define('DB_PASS', getenv('MYSQLPASSWORD') ?: getenv('DB_PASS') ?: '');
 
-layout_head('Members', 'band-members');
-?>
+// Session
+define('SESSION_NAME', 'xuband_session');
+define('SESSION_LIFETIME', 3600 * 8); // 8 hours
 
-<div class="card">
-  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
-    <span class="card-title"><i class="bi bi-people me-2"></i>Band Members</span>
-    <div class="input-group" style="max-width:260px">
-      <span class="input-group-text"><i class="bi bi-search"></i></span>
-      <input id="memberSearch" type="search" class="form-control" placeholder="Search…">
-    </div>
-  </div>
-  <div class="card-body p-3">
-    <?php if (!$members): ?>
-    <div class="empty-state">
-      <div class="empty-icon"><i class="bi bi-people"></i></div>
-      <p>No members found.</p>
-    </div>
-    <?php else: ?>
-    <div class="row g-3" id="memberGrid">
-      <?php foreach ($members as $m):
-        $initials = strtoupper(substr($m['name'], 0, 1));
-        $isMe = $m['id'] === $user['id'];
-      ?>
-      <div class="col-sm-6 col-md-4 col-lg-3 member-item">
-        <div class="card h-100 text-center p-3" style="border:1.5px solid #e3e6ea;border-radius:.6rem">
-          <?php if (!empty($m['avatar_path']) && file_exists(__DIR__ . '/' . $m['avatar_path'])): ?>
-          <img src="<?= h($m['avatar_path']) ?>" alt="<?= h($m['name']) ?>"
-               style="width:64px;height:64px;border-radius:50%;object-fit:cover;margin:0 auto .75rem">
-          <?php else: ?>
-          <div class="user-avatar mx-auto mb-3" style="width:64px;height:64px;font-size:1.4rem">
-            <?= h($initials) ?>
-          </div>
-          <?php endif; ?>
-          <div class="fw-bold" style="color:var(--xu-navy)"><?= h($m['name']) ?><?= $isMe ? ' <span class="badge text-bg-info" style="font-size:.65rem">You</span>' : '' ?></div>
-          <div class="mb-2"><?= roleBadge($m['role']) ?></div>
-          <?php if ($m['instrument']): ?>
-          <div class="text-muted small"><i class="bi bi-music-note me-1"></i><?= h($m['instrument']) ?></div>
-          <?php endif; ?>
-          <?php if ($m['year_level']): ?>
-          <div class="text-muted small"><i class="bi bi-mortarboard me-1"></i><?= h($m['year_level']) ?></div>
-          <?php endif; ?>
-          <?php if (!empty($m['contact_number'])): ?>
-          <div class="text-muted small mt-1"><i class="bi bi-telephone me-1"></i><?= h($m['contact_number']) ?></div>
-          <?php endif; ?>
-        </div>
-      </div>
-      <?php endforeach; ?>
-    </div>
-    <?php endif; ?>
-  </div>
-</div>
+// Uploads
+define('UPLOAD_DIR', __DIR__ . '/../public/uploads/');
+define('UPLOAD_MAX_SIZE', 20 * 1024 * 1024); // 20MB
+define('ALLOWED_TYPES', ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'audio/mpeg', 'audio/mp3']);
+define('ALLOWED_EXTENSIONS', ['pdf', 'jpg', 'jpeg', 'png', 'gif', 'mp3']);
 
-<script>
-document.addEventListener('DOMContentLoaded', function() {
-  const inp = document.getElementById('memberSearch');
-  if (!inp) return;
-  inp.addEventListener('input', function() {
-    const q = this.value.toLowerCase();
-    document.querySelectorAll('.member-item').forEach(function(item) {
-      item.style.display = item.textContent.toLowerCase().includes(q) ? '' : 'none';
-    });
-  });
-});
-</script>
-
-<?php layout_foot(); ?>
+// Penalty points
+define('PENALTY_ABSENT',  150);
+define('PENALTY_LATE',    75);
+define('PENALTY_PRESENT', 0);
