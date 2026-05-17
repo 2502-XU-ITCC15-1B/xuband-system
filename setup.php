@@ -3,291 +3,138 @@ require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/db.php';
 require_once __DIR__ . '/../includes/helpers.php';
 require_once __DIR__ . '/../includes/layout.php';
-requireRole(['moderator','officer']);
+requireLogin();
 $user = currentUser();
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $action = $_POST['action'] ?? '';
+// Stats
+$totalMembers    = dbQueryOne('SELECT COUNT(*) AS n FROM users WHERE role = "member"')['n'] ?? 0;
+$totalOfficers   = dbQueryOne('SELECT COUNT(*) AS n FROM users WHERE role IN ("officer","moderator")')['n'] ?? 0;
+$totalSheets     = dbQueryOne('SELECT COUNT(*) AS n FROM music_sheets')['n'] ?? 0;
+$upcomingEvents  = dbQueryOne('SELECT COUNT(*) AS n FROM events WHERE event_date >= CURDATE()')['n'] ?? 0;
+$activeScholar   = dbQueryOne('SELECT COUNT(*) AS n FROM scholarships WHERE status = "active"')['n'] ?? 0;
+$announcements   = dbQuery('SELECT a.*, u.name AS author FROM announcements a JOIN users u ON u.id = a.created_by ORDER BY a.pinned DESC, a.created_at DESC LIMIT 5');
+$nextEvents      = dbQuery('SELECT e.*, u.name AS organizer FROM events e JOIN users u ON u.id = e.created_by WHERE e.event_date >= CURDATE() ORDER BY e.event_date ASC LIMIT 5');
 
-    if ($action === 'create') {
-        $name     = trim($_POST['name'] ?? '');
-        $email    = trim($_POST['email'] ?? '');
-        $password = $_POST['password'] ?? 'password';
-        $role     = $_POST['role'] ?? 'member';
-        $instr    = trim($_POST['instrument'] ?? '');
-        $yr       = trim($_POST['year_level'] ?? '');
-        $sid      = trim($_POST['student_id'] ?? '');
-        $contact  = trim($_POST['contact_number'] ?? '');
-        if ($role === 'moderator' && $user['role'] !== 'moderator') $role = 'member';
-
-        if (!$name || !$email) { flash('error', 'Name and email are required.'); redirect('/members.php'); }
-        $exists = dbQueryOne('SELECT id FROM users WHERE email = ?', [$email]);
-        if ($exists) { flash('error', 'Email already in use.'); redirect('/members.php'); }
-
-        $hash = password_hash($password, PASSWORD_BCRYPT);
-        dbInsert('INSERT INTO users (name,email,password_hash,role,instrument,year_level,student_id,contact_number) VALUES (?,?,?,?,?,?,?,?)',
-            [$name,$email,$hash,$role,$instr,$yr,$sid,$contact]);
-        flash('success', "Member $name added.");
-        redirect('/members.php');
-    }
-
-    if ($action === 'update') {
-        $id   = (int)($_POST['id'] ?? 0);
-        $name = trim($_POST['name'] ?? '');
-        $email= trim($_POST['email'] ?? '');
-        $role = $_POST['role'] ?? 'member';
-        $instr= trim($_POST['instrument'] ?? '');
-        $yr   = trim($_POST['year_level'] ?? '');
-        $sid  = trim($_POST['student_id'] ?? '');
-        $contact = trim($_POST['contact_number'] ?? '');
-        $status  = $_POST['status'] ?? 'active';
-        if ($role === 'moderator' && $user['role'] !== 'moderator') $role = 'member';
-
-        dbExecute('UPDATE users SET name=?,email=?,role=?,instrument=?,year_level=?,student_id=?,contact_number=?,status=? WHERE id=?',
-            [$name,$email,$role,$instr,$yr,$sid,$contact,$status,$id]);
-        flash('success', 'Member updated.');
-        redirect('/members.php');
-    }
-
-    if ($action === 'delete') {
-        $id = (int)($_POST['id'] ?? 0);
-        if ($id === $user['id']) { flash('error', 'Cannot delete yourself.'); redirect('/members.php'); }
-        dbExecute('DELETE FROM users WHERE id = ?', [$id]);
-        flash('success', 'Member removed.');
-        redirect('/members.php');
-    }
-
-    if ($action === 'reset_password') {
-        $id = (int)($_POST['id'] ?? 0);
-        $pw = $_POST['new_password'] ?? 'password';
-        $hash = password_hash($pw, PASSWORD_BCRYPT);
-        dbExecute('UPDATE users SET password_hash = ? WHERE id = ?', [$hash, $id]);
-        flash('success', 'Password reset.');
-        redirect('/members.php');
-    }
+// My attendance (for members)
+$myStats = null;
+if ($user['role'] === 'member') {
+    $myStats = dbQueryOne('SELECT ps.total_points,
+        (SELECT COUNT(*) FROM attendance WHERE user_id = ? AND status = "present") AS presents,
+        (SELECT COUNT(*) FROM attendance WHERE user_id = ? AND status = "absent") AS absents
+        FROM penalty_summary ps WHERE ps.user_id = ?',
+        [$user['id'], $user['id'], $user['id']]);
+    $myScholarship = dbQueryOne('SELECT * FROM scholarships WHERE user_id = ? ORDER BY id DESC LIMIT 1', [$user['id']]);
 }
 
-$members = dbQuery('SELECT u.*, COALESCE(ps.total_points,0) AS penalty_points
-    FROM users u
-    LEFT JOIN penalty_summary ps ON ps.user_id = u.id
-    ORDER BY u.role ASC, u.name ASC');
-
-layout_head('Members', 'members');
+layout_head('Dashboard', 'dashboard');
 ?>
 
-<?php if ($e = getFlash('error')): ?>
-<div class="alert alert-danger d-flex align-items-center gap-2" data-auto-dismiss>
-  <i class="bi bi-exclamation-triangle-fill"></i> <?= h($e) ?>
-</div>
-<?php endif; ?>
 <?php if ($s = getFlash('success')): ?>
 <div class="alert alert-success d-flex align-items-center gap-2" data-auto-dismiss>
   <i class="bi bi-check-circle-fill"></i> <?= h($s) ?>
 </div>
 <?php endif; ?>
 
-<div class="card">
-  <div class="card-header d-flex justify-content-between align-items-center">
-    <span class="card-title"><i class="bi bi-people me-2"></i>Band Members</span>
-    <button class="btn btn-primary btn-sm" onclick="openModal('xumodalAdd')">
-      <i class="bi bi-person-plus me-1"></i> Add Member
-    </button>
+<!-- Stats -->
+<div class="stats-grid">
+  <?php if (isOfficer()): ?>
+  <div class="stat-card">
+    <div class="stat-icon"><i class="bi bi-people"></i></div>
+    <div><div class="stat-value"><?= $totalMembers ?></div><div class="stat-label">Band Members</div></div>
   </div>
-  <div class="card-body py-3 px-3">
-    <div class="input-group" style="max-width:320px">
-      <span class="input-group-text"><i class="bi bi-search"></i></span>
-      <input id="tableSearch" type="search" class="form-control" placeholder="Search members…">
+  <div class="stat-card">
+    <div class="stat-icon"><i class="bi bi-music-note-beamed"></i></div>
+    <div><div class="stat-value"><?= $totalSheets ?></div><div class="stat-label">Music Sheets</div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon gold"><i class="bi bi-award"></i></div>
+    <div><div class="stat-value"><?= $activeScholar ?></div><div class="stat-label">Active Scholars</div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon"><i class="bi bi-calendar3"></i></div>
+    <div><div class="stat-value"><?= $upcomingEvents ?></div><div class="stat-label">Upcoming Events</div></div>
+  </div>
+  <?php else: ?>
+  <div class="stat-card">
+    <div class="stat-icon"><i class="bi bi-check2-circle"></i></div>
+    <div><div class="stat-value"><?= $myStats['presents'] ?? 0 ?></div><div class="stat-label">Times Present</div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon"><i class="bi bi-x-circle"></i></div>
+    <div><div class="stat-value"><?= $myStats['absents'] ?? 0 ?></div><div class="stat-label">Absences</div></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-icon gold"><i class="bi bi-exclamation-triangle"></i></div>
+    <div>
+      <div class="stat-value <?= penaltyColor((float)($myStats['total_points'] ?? 0)) ?>"><?= $myStats['total_points'] ?? 0 ?></div>
+      <div class="stat-label">Penalty Points</div>
     </div>
   </div>
-  <div class="table-wrap" data-searchable>
-    <table>
-      <thead>
-        <tr>
-          <th>Name</th><th>Email</th><th>Role</th><th>Instrument</th>
-          <th>Year</th><th>Student ID</th><th>Status</th><th>Penalty Pts</th><th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        <?php foreach ($members as $m): ?>
-        <tr>
-          <td><strong><?= h($m['name']) ?></strong></td>
-          <td class="small text-muted"><?= h($m['email']) ?></td>
-          <td><?= roleBadge($m['role']) ?></td>
-          <td><?= h($m['instrument'] ?: '—') ?></td>
-          <td><?= h($m['year_level'] ?: '—') ?></td>
-          <td class="small"><?= h($m['student_id'] ?: '—') ?></td>
-          <td><?= statusBadge($m['status']) ?></td>
-          <td class="<?= penaltyColor((float)$m['penalty_points']) ?> fw-bold"><?= $m['penalty_points'] ?></td>
-          <td>
-            <button class="btn btn-xs btn-outline" onclick="openModal('xumodalEdit'); fillEdit(<?= htmlspecialchars(json_encode($m), ENT_QUOTES) ?>)">
-              <i class="bi bi-pencil"></i> Edit
-            </button>
-            <?php if ($m['id'] !== $user['id']): ?>
-            <form method="POST" style="display:inline">
-              <input type="hidden" name="action" value="delete">
-              <input type="hidden" name="id" value="<?= $m['id'] ?>">
-              <button type="submit" class="btn btn-xs btn-danger" data-confirm="Delete <?= h($m['name']) ?>?">
-                <i class="bi bi-trash"></i>
-              </button>
-            </form>
-            <?php endif; ?>
-          </td>
-        </tr>
-        <?php endforeach; ?>
-        <?php if (!$members): ?>
-        <tr><td colspan="9">
-          <div class="empty-state">
-            <div class="empty-icon"><i class="bi bi-people"></i></div>
-            <p>No members yet.</p>
-          </div>
-        </td></tr>
-        <?php endif; ?>
-      </tbody>
-    </table>
-  </div>
-</div>
-
-<!-- Add Modal -->
-<div class="xu-modal-overlay" id="xumodalAdd">
-  <div class="xu-modal">
-    <div class="xu-modal-header">
-      <span class="xu-modal-title"><i class="bi bi-person-plus me-2"></i>Add Member</span>
-      <button class="xu-modal-close" onclick="closeModal(this)"><i class="bi bi-x-lg"></i></button>
+  <?php if (isset($myScholarship)): ?>
+  <div class="stat-card">
+    <div class="stat-icon"><i class="bi bi-award"></i></div>
+    <div>
+      <div class="stat-value" style="font-size:1.1rem"><?= ucfirst($myScholarship['status'] ?? '—') ?></div>
+      <div class="stat-label">Scholarship Status</div>
     </div>
-    <form method="POST">
-      <input type="hidden" name="action" value="create">
-      <div class="xu-modal-body">
-        <div class="row g-3">
-          <div class="col-md-6">
-            <label class="form-label">Full Name *</label>
-            <input name="name" class="form-control" required>
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">Email *</label>
-            <input name="email" type="email" class="form-control" required>
-          </div>
-        </div>
-        <div class="row g-3 mt-0">
-          <div class="col-md-6">
-            <label class="form-label">Password</label>
-            <input name="password" class="form-control" placeholder="Default: password">
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">Role</label>
-            <select name="role" class="form-control">
-              <option value="member">Member</option>
-              <option value="officer">Officer</option>
-              <?php if ($user['role'] === 'moderator'): ?><option value="moderator">Moderator</option><?php endif; ?>
-            </select>
-          </div>
-        </div>
-        <div class="row g-3 mt-0">
-          <div class="col-md-6">
-            <label class="form-label">Instrument</label>
-            <input name="instrument" class="form-control">
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">Year Level</label>
-            <input name="year_level" class="form-control" placeholder="e.g. 2nd Year">
-          </div>
-        </div>
-        <div class="row g-3 mt-0">
-          <div class="col-md-6">
-            <label class="form-label">Student ID</label>
-            <input name="student_id" class="form-control">
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">Contact</label>
-            <input name="contact_number" class="form-control">
-          </div>
-        </div>
-      </div>
-      <div class="xu-modal-footer">
-        <button type="button" class="btn btn-outline" onclick="closeModal(this)">Cancel</button>
-        <button type="submit" class="btn btn-primary">
-          <i class="bi bi-person-plus me-1"></i>Add Member
-        </button>
-      </div>
-    </form>
   </div>
+  <?php endif; ?>
+  <?php endif; ?>
 </div>
 
-<!-- Edit Modal -->
-<div class="xu-modal-overlay" id="xumodalEdit">
-  <div class="xu-modal">
-    <div class="xu-modal-header">
-      <span class="xu-modal-title"><i class="bi bi-pencil me-2"></i>Edit Member</span>
-      <button class="xu-modal-close" onclick="closeModal(this)"><i class="bi bi-x-lg"></i></button>
+<div class="row g-3">
+
+  <!-- Announcements -->
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span class="card-title"><i class="bi bi-megaphone me-2"></i>Latest Announcements</span>
+        <a href="/announcements.php" class="btn btn-sm btn-outline">View All</a>
+      </div>
+      <div class="card-body p-0">
+        <?php if (!$announcements): ?>
+        <div class="empty-state"><div class="empty-icon"><i class="bi bi-inbox"></i></div><p>No announcements yet.</p></div>
+        <?php else: foreach ($announcements as $ann): ?>
+        <div class="px-3 py-3 border-bottom">
+          <div class="d-flex align-items-center gap-2 mb-1">
+            <?php if ($ann['pinned']): ?><span class="badge text-bg-warning" style="font-size:.65rem">PINNED</span><?php endif; ?>
+            <span class="text-muted" style="font-size:.75rem"><?= formatDate($ann['created_at']) ?></span>
+          </div>
+          <div class="fw-bold" style="color:var(--navy)"><?= h($ann['title']) ?></div>
+          <div class="text-muted small mt-1"><?= h(mb_substr($ann['body'], 0, 100)) ?>…</div>
+        </div>
+        <?php endforeach; endif; ?>
+      </div>
     </div>
-    <form method="POST">
-      <input type="hidden" name="action" value="update">
-      <input type="hidden" name="id" id="edit_id">
-      <div class="xu-modal-body">
-        <div class="row g-3">
-          <div class="col-md-6">
-            <label class="form-label">Full Name *</label>
-            <input id="edit_name" name="name" class="form-control" required>
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">Email *</label>
-            <input id="edit_email" name="email" type="email" class="form-control" required>
-          </div>
-        </div>
-        <div class="row g-3 mt-0">
-          <div class="col-md-6">
-            <label class="form-label">Role</label>
-            <select id="edit_role" name="role" class="form-control">
-              <option value="member">Member</option>
-              <option value="officer">Officer</option>
-              <?php if ($user['role'] === 'moderator'): ?><option value="moderator">Moderator</option><?php endif; ?>
-            </select>
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">Status</label>
-            <select id="edit_status" name="status" class="form-control">
-              <option value="active">Active</option>
-              <option value="inactive">Inactive</option>
-            </select>
-          </div>
-        </div>
-        <div class="row g-3 mt-0">
-          <div class="col-md-6">
-            <label class="form-label">Instrument</label>
-            <input id="edit_instrument" name="instrument" class="form-control">
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">Year Level</label>
-            <input id="edit_year_level" name="year_level" class="form-control">
-          </div>
-        </div>
-        <div class="row g-3 mt-0">
-          <div class="col-md-6">
-            <label class="form-label">Student ID</label>
-            <input id="edit_student_id" name="student_id" class="form-control">
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">Contact</label>
-            <input id="edit_contact_number" name="contact_number" class="form-control">
-          </div>
-        </div>
-      </div>
-      <div class="xu-modal-footer">
-        <button type="button" class="btn btn-outline" onclick="closeModal(this)">Cancel</button>
-        <button type="submit" class="btn btn-primary">
-          <i class="bi bi-floppy me-1"></i>Save Changes
-        </button>
-      </div>
-    </form>
   </div>
-</div>
 
-<script>
-function fillEdit(m) {
-  ['id','name','email','role','status','instrument','year_level','student_id','contact_number'].forEach(k => {
-    const el = document.getElementById('edit_' + k);
-    if (el) el.value = m[k] || '';
-  });
-}
-</script>
+  <!-- Upcoming Events -->
+  <div class="col-md-6">
+    <div class="card h-100">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <span class="card-title"><i class="bi bi-calendar3 me-2"></i>Upcoming Events</span>
+        <a href="/events.php" class="btn btn-sm btn-outline">View Calendar</a>
+      </div>
+      <div class="card-body p-0">
+        <?php if (!$nextEvents): ?>
+        <div class="empty-state"><div class="empty-icon"><i class="bi bi-calendar-x"></i></div><p>No upcoming events.</p></div>
+        <?php else: foreach ($nextEvents as $ev): ?>
+        <div class="px-3 py-3 border-bottom d-flex gap-3 align-items-start">
+          <div class="text-center flex-shrink-0" style="min-width:44px;background:var(--navy);color:#fff;border-radius:8px;padding:6px 4px">
+            <div style="font-size:.65rem;font-weight:700;text-transform:uppercase;opacity:.7"><?= (new DateTime($ev['event_date']))->format('M') ?></div>
+            <div style="font-size:1.2rem;font-weight:800;line-height:1"><?= (new DateTime($ev['event_date']))->format('d') ?></div>
+          </div>
+          <div>
+            <div class="fw-bold" style="color:var(--navy)"><?= h($ev['title']) ?></div>
+            <div class="text-muted small"><?= h($ev['location'] ?? '') ?><?= $ev['event_time'] ? ' · ' . date('h:i A', strtotime($ev['event_time'])) : '' ?></div>
+            <span class="badge badge-member mt-1"><?= h(ucfirst($ev['type'])) ?></span>
+          </div>
+        </div>
+        <?php endforeach; endif; ?>
+      </div>
+    </div>
+  </div>
+
+</div>
 
 <?php layout_foot(); ?>

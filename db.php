@@ -11,57 +11,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
 
     if ($action === 'create') {
-        $title = trim($_POST['title'] ?? '');
-        $type  = $_POST['type'] ?? 'rehearsal';
-        $date  = $_POST['event_date'] ?? '';
-        $time  = $_POST['event_time'] ?: null;
-        $loc   = trim($_POST['location'] ?? '');
-        $desc  = trim($_POST['description'] ?? '');
-        if (!$title || !$date) { flash('error', 'Title and date are required.'); redirect('/events.php'); }
-        dbInsert('INSERT INTO events (title,type,event_date,event_time,location,description,created_by) VALUES (?,?,?,?,?,?,?)',
-            [$title,$type,$date,$time,$loc,$desc,$user['id']]);
-        flash('success', "Event \"$title\" created.");
-        redirect('/events.php');
+        $title   = trim($_POST['title'] ?? '');
+        $body    = trim($_POST['body'] ?? '');
+        $pinned  = isset($_POST['pinned']) ? 1 : 0;
+        $expires = $_POST['expires_at'] ?: null;
+        if (!$title || !$body) { flash('error', 'Title and body are required.'); redirect('/announcements.php'); }
+        dbInsert('INSERT INTO announcements (title,body,created_by,pinned,expires_at) VALUES (?,?,?,?,?)',
+            [$title, $body, $user['id'], $pinned, $expires]);
+        flash('success', 'Announcement posted.');
+        redirect('/announcements.php');
     }
 
     if ($action === 'update') {
-        $id   = (int)($_POST['id'] ?? 0);
-        $title= trim($_POST['title'] ?? '');
-        $type = $_POST['type'] ?? 'rehearsal';
-        $date = $_POST['event_date'] ?? '';
-        $time = $_POST['event_time'] ?: null;
-        $loc  = trim($_POST['location'] ?? '');
-        $desc = trim($_POST['description'] ?? '');
-        dbExecute('UPDATE events SET title=?,type=?,event_date=?,event_time=?,location=?,description=? WHERE id=?',
-            [$title,$type,$date,$time,$loc,$desc,$id]);
-        flash('success', 'Event updated.');
-        redirect('/events.php');
+        $id      = (int)($_POST['id'] ?? 0);
+        $title   = trim($_POST['title'] ?? '');
+        $body    = trim($_POST['body'] ?? '');
+        $pinned  = isset($_POST['pinned']) ? 1 : 0;
+        $expires = $_POST['expires_at'] ?: null;
+        if (!$title || !$body) { flash('error', 'Title and body are required.'); redirect('/announcements.php'); }
+        dbExecute('UPDATE announcements SET title=?,body=?,pinned=?,expires_at=?,updated_at=NOW() WHERE id=?',
+            [$title, $body, $pinned, $expires, $id]);
+        flash('success', 'Announcement updated.');
+        redirect('/announcements.php');
     }
 
     if ($action === 'delete') {
-        $id = (int)($_POST['id'] ?? 0);
-        dbExecute('DELETE FROM events WHERE id = ?', [$id]);
-        flash('success', 'Event deleted.');
-        redirect('/events.php');
+        $id = (int)($_POST['del_id'] ?? $_POST['id'] ?? 0);
+        dbExecute('DELETE FROM announcements WHERE id = ?', [$id]);
+        flash('success', 'Announcement deleted.');
+        redirect('/announcements.php');
+    }
+
+    if ($action === 'bulk_delete') {
+        $ids = array_map('intval', $_POST['ids'] ?? []);
+        if ($ids) {
+            $placeholders = implode(',', array_fill(0, count($ids), '?'));
+            dbExecute("DELETE FROM announcements WHERE id IN ($placeholders)", $ids);
+            flash('success', count($ids) . ' announcement(s) deleted.');
+        }
+        redirect('/announcements.php');
     }
 }
 
-$month = (int)($_GET['month'] ?? date('n'));
-$year  = (int)($_GET['year']  ?? date('Y'));
-if ($month < 1) { $month = 12; $year--; }
-if ($month > 12){ $month = 1;  $year++; }
-$firstDay    = mktime(0,0,0,$month,1,$year);
-$daysInMonth = (int)date('t', $firstDay);
-$startDow    = (int)date('w', $firstDay);
-$monthEvents = dbQuery('SELECT * FROM events WHERE MONTH(event_date)=? AND YEAR(event_date)=? ORDER BY event_date,event_time', [$month,$year]);
-$eventsByDay = [];
-foreach ($monthEvents as $ev) { $d = (int)date('j', strtotime($ev['event_date'])); $eventsByDay[$d][] = $ev; }
-$allEvents   = dbQuery('SELECT e.*, u.name AS organizer FROM events e JOIN users u ON u.id = e.created_by ORDER BY e.event_date DESC');
-$monthName   = date('F Y', $firstDay);
-$prevMonth = $month-1; $prevYear = $year; if ($prevMonth<1) { $prevMonth=12; $prevYear--; }
-$nextMonth = $month+1; $nextYear = $year; if ($nextMonth>12){ $nextMonth=1;  $nextYear++; }
+$announcements = dbQuery('SELECT a.*, u.name AS author FROM announcements a JOIN users u ON u.id = a.created_by ORDER BY a.pinned DESC, a.created_at DESC');
 
-layout_head('Events & Calendar', 'events');
+layout_head('Announcements', 'announcements');
 ?>
 
 <?php if ($e = getFlash('error')): ?>
@@ -75,172 +69,234 @@ layout_head('Events & Calendar', 'events');
 </div>
 <?php endif; ?>
 
-<?php if (!isOfficer()): ?>
-<div class="alert alert-info d-flex align-items-center gap-2">
-  <i class="bi bi-info-circle-fill"></i> You can view events. Contact an officer to add or modify events.
-</div>
-<?php endif; ?>
-
-<div class="row g-3 align-items-start">
-
-<div class="col-lg-8">
-  <div class="card">
-    <div class="card-header d-flex justify-content-between align-items-center">
-      <div class="d-flex align-items-center gap-2">
-        <a href="?month=<?= $prevMonth ?>&year=<?= $prevYear ?>" class="btn btn-outline btn-sm">
-          <i class="bi bi-chevron-left"></i>
-        </a>
-        <span class="card-title"><?= $monthName ?></span>
-        <a href="?month=<?= $nextMonth ?>&year=<?= $nextYear ?>" class="btn btn-outline btn-sm">
-          <i class="bi bi-chevron-right"></i>
-        </a>
-      </div>
-      <?php if (isOfficer()): ?>
-      <button class="btn btn-primary btn-sm" onclick="openModal('xumodalEvent')" onclick="resetEventForm()">
-        <i class="bi bi-plus-lg me-1"></i> Add Event
+<div class="card">
+  <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+    <span class="card-title"><i class="bi bi-megaphone me-2"></i>Announcements</span>
+    <?php if (isOfficer()): ?>
+    <div class="d-flex gap-2" id="annHeaderBtns">
+      <button type="button" class="btn btn-sm btn-outline-secondary d-none" id="annSelectAllBtn"
+        onclick="annToggleAll()">
+        <i class="bi bi-check-all me-1"></i>Select All
       </button>
-      <?php endif; ?>
+      <button class="btn btn-sm btn-outline-danger d-none" id="bulkDeleteBtn"
+        onclick="bulkDelete('announcements')">
+        <i class="bi bi-trash me-1"></i>Delete Selected (<span id="bulkCount">0</span>)
+      </button>
+      <button class="btn btn-primary btn-sm" onclick="openModal('xumodalAnn'); resetAnnForm()">
+        <i class="bi bi-plus-lg me-1"></i> Post Announcement
+      </button>
     </div>
-    <div class="card-body">
-      <div class="calendar-grid">
-        <?php foreach (['Sun','Mon','Tue','Wed','Thu','Fri','Sat'] as $d): ?>
-          <div class="cal-day-header"><?= $d ?></div>
-        <?php endforeach; ?>
-        <?php for ($i = 0; $i < $startDow; $i++) echo '<div class="cal-day other-month"></div>'; ?>
-        <?php for ($d=1; $d<=$daysInMonth; $d++):
-          $isToday = ($d==date('j') && $month==date('n') && $year==date('Y'));
-        ?>
-        <div class="cal-day <?= $isToday?'today':'' ?>">
-          <div class="cal-day-num"><?= $d ?></div>
-          <?php foreach ($eventsByDay[$d] ?? [] as $ev): ?>
-          <span class="cal-event-dot <?= h($ev['type']) ?>" title="<?= h($ev['title']) ?>"><?= h($ev['title']) ?></span>
-          <?php endforeach; ?>
-        </div>
-        <?php endfor; ?>
-      </div>
-      <div class="d-flex gap-3 mt-3 flex-wrap" style="font-size:.75rem">
-        <span><span class="d-inline-block me-1" style="width:10px;height:10px;background:var(--navy);border-radius:2px"></span>Rehearsal</span>
-        <span><span class="d-inline-block me-1" style="width:10px;height:10px;background:#7c3aed;border-radius:2px"></span>Performance</span>
-        <span><span class="d-inline-block me-1" style="width:10px;height:10px;background:var(--green);border-radius:2px"></span>Meeting</span>
-        <span><span class="d-inline-block me-1" style="width:10px;height:10px;background:var(--gold);border-radius:2px"></span>Other</span>
-      </div>
-    </div>
+    <?php endif; ?>
   </div>
-</div>
-
-<div class="col-lg-4">
-  <div class="card">
-    <div class="card-header"><span class="card-title"><i class="bi bi-list-ul me-2"></i>All Events</span></div>
-    <div style="max-height:520px;overflow-y:auto">
-      <?php if (!$allEvents): ?>
-      <div class="empty-state"><div class="empty-icon"><i class="bi bi-calendar-x"></i></div><p>No events yet.</p></div>
-      <?php else: foreach ($allEvents as $ev):
-        $isPast = strtotime($ev['event_date']) < strtotime(date('Y-m-d'));
+  <div class="card-body p-3">
+    <?php if (!$announcements): ?>
+    <div class="empty-state"><div class="empty-icon"><i class="bi bi-inbox"></i></div><p>No announcements yet.</p></div>
+    <?php else: ?>
+    <form method="POST" id="bulkForm-announcements">
+      <input type="hidden" name="action" value="bulk_delete">
+      <input type="hidden" name="del_id" value="" id="annDelId">
+      <?php foreach ($announcements as $ann):
+        $expired = $ann['expires_at'] && strtotime($ann['expires_at']) < strtotime('today');
+        $annJson = htmlspecialchars(json_encode($ann), ENT_QUOTES);
       ?>
-      <div class="px-3 py-2 border-bottom <?= $isPast ? 'opacity-50' : '' ?>">
-        <div class="d-flex align-items-center justify-content-between flex-wrap gap-1 mb-1">
-          <span class="badge badge-member"><?= h(ucfirst($ev['type'])) ?></span>
+      <div class="announcement-card <?= $ann['pinned'] ? 'pinned' : '' ?>"
+           <?= $expired ? 'style="opacity:.55"' : '' ?>
+           style="cursor:pointer"
+           onclick="viewAnn(<?= $annJson ?>)"
+           role="button" tabindex="0">
+        <div class="d-flex align-items-start justify-content-between flex-wrap gap-2 mb-2" onclick="event.stopPropagation()">
+          <div class="d-flex align-items-center gap-2">
+            <?php if (isOfficer()): ?>
+            <input type="checkbox" name="ids[]" value="<?= $ann['id'] ?>"
+              class="form-check-input bulk-cb" onchange="updateBulkCount('announcements')"
+              style="margin-top:2px" onclick="event.stopPropagation()">
+            <?php endif; ?>
+            <?php if ($ann['pinned']): ?>
+            <span class="badge text-bg-warning" style="font-size:.7rem">
+              <i class="bi bi-pin-angle-fill me-1"></i>PINNED
+            </span>
+            <?php endif; ?>
+            <?php if ($expired): ?><span class="badge text-bg-secondary">Expired</span><?php endif; ?>
+          </div>
           <?php if (isOfficer()): ?>
-          <div class="d-flex gap-1">
-            <button class="btn btn-xs btn-outline" onclick="openModal('xumodalEvent'); fillEvent(<?= htmlspecialchars(json_encode($ev), ENT_QUOTES) ?>)">
-              <i class="bi bi-pencil"></i>
+          <div class="d-flex gap-2" onclick="event.stopPropagation()">
+            <button type="button" class="btn btn-sm btn-outline-secondary"
+              onclick="openModal('xumodalAnn'); fillAnn(<?= $annJson ?>)">
+              <i class="bi bi-pencil me-1"></i>Edit
             </button>
-            <form method="POST" style="display:inline">
-              <input type="hidden" name="action" value="delete">
-              <input type="hidden" name="id" value="<?= $ev['id'] ?>">
-              <button class="btn btn-xs btn-danger" data-confirm="Delete this event?">
-                <i class="bi bi-trash"></i>
-              </button>
-            </form>
+            <button type="button" class="btn btn-sm btn-outline-danger"
+              onclick="annDelete(<?= $ann['id'] ?>)">
+              <i class="bi bi-trash me-1"></i>Delete
+            </button>
           </div>
           <?php endif; ?>
         </div>
-        <div class="fw-bold small" style="color:var(--navy)"><?= h($ev['title']) ?></div>
-        <div class="text-muted" style="font-size:.75rem">
-          <?= formatDate($ev['event_date']) ?>
-          <?= $ev['event_time'] ? ' · '.date('h:i A', strtotime($ev['event_time'])) : '' ?>
-          <?= $ev['location'] ? ' · '.h($ev['location']) : '' ?>
+        <h3 style="color:var(--xu-navy);margin-bottom:6px"><?= h($ann['title']) ?></h3>
+        <p style="color:var(--text);line-height:1.7;white-space:pre-line;
+           display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden">
+          <?= h($ann['body']) ?>
+        </p>
+        <div class="text-muted d-flex align-items-center gap-1 flex-wrap" style="font-size:.75rem;margin-top:6px">
+          <i class="bi bi-person"></i><?= h($ann['author']) ?>
+          <span>&middot;</span>
+          <i class="bi bi-clock"></i><?= formatDateTime($ann['created_at']) ?>
+          <?= $ann['expires_at'] ? '<span>&middot;</span> Expires ' . formatDate($ann['expires_at']) : '' ?>
+          <span class="ms-auto text-primary" style="font-size:.75rem"><i class="bi bi-arrows-angle-expand me-1"></i>Click to read more</span>
         </div>
       </div>
-      <?php endforeach; endif; ?>
+      <?php endforeach; ?>
+    </form>
+    <?php endif; ?>
+  </div>
+</div>
+
+<!-- View Announcement Modal (all users) -->
+<div class="xu-modal-overlay" id="xumodalAnnView">
+  <div class="xu-modal" style="max-width:680px">
+    <div class="xu-modal-header">
+      <span class="xu-modal-title" id="annViewTitle">Announcement</span>
+      <button class="xu-modal-close" onclick="closeModal(this)"><i class="bi bi-x-lg"></i></button>
+    </div>
+    <div class="xu-modal-body" style="max-height:70vh;overflow-y:auto">
+      <div id="annViewPinBadge" class="mb-2" style="display:none">
+        <span class="badge text-bg-warning"><i class="bi bi-pin-angle-fill me-1"></i>PINNED</span>
+      </div>
+      <div id="annViewExpiredBadge" class="mb-2" style="display:none">
+        <span class="badge text-bg-secondary">Expired</span>
+      </div>
+      <p id="annViewBody" style="white-space:pre-line;line-height:1.8;color:var(--text);font-size:.93rem"></p>
+      <hr>
+      <div class="text-muted d-flex align-items-center gap-2 flex-wrap" style="font-size:.8rem">
+        <span><i class="bi bi-person me-1"></i><span id="annViewAuthor"></span></span>
+        <span>&middot;</span>
+        <span><i class="bi bi-clock me-1"></i><span id="annViewDate"></span></span>
+        <span id="annViewExpiry"></span>
+      </div>
+    </div>
+    <div class="xu-modal-footer">
+      <button type="button" class="btn btn-outline-secondary" onclick="closeModal(this)">Close</button>
     </div>
   </div>
 </div>
 
-</div>
-
 <?php if (isOfficer()): ?>
-<div class="xu-modal-overlay" id="xumodalEvent">
-  <div class="xu-modal">
+<!-- Create/Edit Modal -->
+<div class="xu-modal-overlay" id="xumodalAnn">
+  <div class="xu-modal" style="max-width:640px">
     <div class="xu-modal-header">
-      <span class="xu-modal-title" id="eventModalTitle">Add Event</span>
+      <span class="xu-modal-title" id="annModalTitle">Post Announcement</span>
       <button class="xu-modal-close" onclick="closeModal(this)"><i class="bi bi-x-lg"></i></button>
     </div>
     <form method="POST">
-      <input type="hidden" name="action" id="ev_action" value="create">
-      <input type="hidden" name="id"     id="ev_id"     value="">
+      <input type="hidden" name="action" id="ann_action" value="create">
+      <input type="hidden" name="id"     id="ann_id"     value="">
       <div class="xu-modal-body">
         <div class="mb-3">
           <label class="form-label">Title *</label>
-          <input id="ev_title" name="title" class="form-control" required>
+          <input id="ann_title" name="title" class="form-control" required>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Body *</label>
+          <textarea id="ann_body" name="body" class="form-control" rows="6" required></textarea>
         </div>
         <div class="row g-3">
           <div class="col-md-6">
-            <label class="form-label">Type</label>
-            <select id="ev_type" name="type" class="form-control">
-              <option value="rehearsal">Rehearsal</option>
-              <option value="performance">Performance</option>
-              <option value="meeting">Meeting</option>
-              <option value="competition">Competition</option>
-              <option value="other">Other</option>
-            </select>
+            <label class="form-label">Expiry Date (optional)</label>
+            <input id="ann_expires" name="expires_at" type="date" class="form-control">
           </div>
-          <div class="col-md-6">
-            <label class="form-label">Date *</label>
-            <input id="ev_date" name="event_date" type="date" class="form-control" required>
+          <div class="col-md-6 d-flex align-items-end pb-1">
+            <div class="form-check">
+              <input id="ann_pinned" name="pinned" type="checkbox" class="form-check-input">
+              <label class="form-check-label" for="ann_pinned">Pin this announcement</label>
+            </div>
           </div>
-        </div>
-        <div class="row g-3 mt-0">
-          <div class="col-md-6">
-            <label class="form-label">Time</label>
-            <input id="ev_time" name="event_time" type="time" class="form-control">
-          </div>
-          <div class="col-md-6">
-            <label class="form-label">Location</label>
-            <input id="ev_loc" name="location" class="form-control">
-          </div>
-        </div>
-        <div class="mt-3">
-          <label class="form-label">Description</label>
-          <textarea id="ev_desc" name="description" class="form-control"></textarea>
         </div>
       </div>
       <div class="xu-modal-footer">
-        <button type="button" class="btn btn-outline" onclick="closeModal(this)">Cancel</button>
-        <button type="submit" class="btn btn-primary">Save Event</button>
+        <button type="button" class="btn btn-outline-secondary" onclick="closeModal(this)">Cancel</button>
+        <button type="submit" class="btn btn-primary">Post</button>
       </div>
     </form>
   </div>
 </div>
-<script>
-function resetEventForm(){
-  document.getElementById('ev_action').value='create';
-  document.getElementById('eventModalTitle').textContent='Add Event';
-  ['id','title','date','time','loc','desc'].forEach(k=>{const el=document.getElementById('ev_'+k);if(el)el.value='';});
-  document.getElementById('ev_type').value='rehearsal';
-}
-function fillEvent(e){
-  document.getElementById('ev_action').value='update';
-  document.getElementById('eventModalTitle').textContent='Edit Event';
-  document.getElementById('ev_id').value=e.id;
-  document.getElementById('ev_title').value=e.title;
-  document.getElementById('ev_type').value=e.type;
-  document.getElementById('ev_date').value=e.event_date;
-  document.getElementById('ev_time').value=e.event_time||'';
-  document.getElementById('ev_loc').value=e.location||'';
-  document.getElementById('ev_desc').value=e.description||'';
-}
-</script>
 <?php endif; ?>
+
+<script>
+function viewAnn(a) {
+  var today = new Date(); today.setHours(0,0,0,0);
+  var expired = a.expires_at && new Date(a.expires_at) < today;
+  document.getElementById('annViewTitle').textContent = a.title;
+  document.getElementById('annViewBody').textContent  = a.body;
+  document.getElementById('annViewAuthor').textContent = a.author || '';
+  document.getElementById('annViewDate').textContent   = a.created_at || '';
+  document.getElementById('annViewPinBadge').style.display  = a.pinned == 1 ? '' : 'none';
+  document.getElementById('annViewExpiredBadge').style.display = expired ? '' : 'none';
+  var expEl = document.getElementById('annViewExpiry');
+  expEl.textContent = a.expires_at ? ' · Expires ' + a.expires_at : '';
+  openModal('xumodalAnnView');
+}
+function resetAnnForm() {
+  document.getElementById('ann_action').value = 'create';
+  document.getElementById('annModalTitle').textContent = 'Post Announcement';
+  ['id','title','body','expires'].forEach(k => { const el = document.getElementById('ann_'+k); if(el) el.value=''; });
+  document.getElementById('ann_pinned').checked = false;
+}
+function fillAnn(a) {
+  document.getElementById('ann_action').value = 'update';
+  document.getElementById('annModalTitle').textContent = 'Edit Announcement';
+  document.getElementById('ann_id').value      = a.id;
+  document.getElementById('ann_title').value   = a.title;
+  document.getElementById('ann_body').value    = a.body;
+  document.getElementById('ann_expires').value = a.expires_at || '';
+  document.getElementById('ann_pinned').checked = a.pinned == 1;
+}
+function annDelete(id) {
+  if (!confirm('Delete this announcement?')) return;
+  var form = document.getElementById('bulkForm-announcements');
+  form.querySelector('[name=action]').value = 'delete';
+  document.getElementById('annDelId').value = id;
+  form.submit();
+}
+function updateBulkCount(scope) {
+  var checked = document.querySelectorAll('#bulkForm-' + scope + ' .bulk-cb:checked').length;
+  var btn = document.getElementById('bulkDeleteBtn');
+  var selBtn = document.getElementById('annSelectAllBtn');
+  document.getElementById('bulkCount').textContent = checked;
+  btn.classList.toggle('d-none', checked === 0);
+  if (selBtn) selBtn.classList.toggle('d-none', false);
+}
+function bulkDelete(scope) {
+  var checked = document.querySelectorAll('#bulkForm-' + scope + ' .bulk-cb:checked').length;
+  if (!checked) return;
+  if (!confirm('Delete ' + checked + ' selected announcement(s)?')) return;
+  var form = document.getElementById('bulkForm-' + scope);
+  form.querySelector('[name=action]').value = 'bulk_delete';
+  form.submit();
+}
+function annToggleAll() {
+  var cbs = document.querySelectorAll('#bulkForm-announcements .bulk-cb');
+  var allChecked = [...cbs].every(c => c.checked);
+  cbs.forEach(c => c.checked = !allChecked);
+  updateBulkCount('announcements');
+  var btn = document.getElementById('annSelectAllBtn');
+  if (btn) btn.innerHTML = allChecked
+    ? '<i class="bi bi-check-all me-1"></i>Select All'
+    : '<i class="bi bi-x-circle me-1"></i>Deselect All';
+}
+document.addEventListener('DOMContentLoaded', function() {
+  <?php if (isOfficer()): ?>
+  var selBtn = document.getElementById('annSelectAllBtn');
+  if (selBtn && document.querySelectorAll('.bulk-cb').length > 0) {
+    selBtn.classList.remove('d-none');
+  }
+  <?php endif; ?>
+  // Keyboard accessibility for announcement cards
+  document.querySelectorAll('.announcement-card[role=button]').forEach(function(card) {
+    card.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); card.click(); }
+    });
+  });
+});
+</script>
 
 <?php layout_foot(); ?>
