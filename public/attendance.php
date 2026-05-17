@@ -18,7 +18,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (!$title || !$date) { flash('error', 'Title and date required.'); redirect('/attendance.php'); }
         $event_id = dbInsert('INSERT INTO events (title,type,event_date,location,created_by) VALUES (?,?,?,?,?)',
             [$title, $type, $date, $loc, $user['id']]);
-        flash('success', 'Attendance event created. Now mark attendance below.');
+        flash('success', 'Attendance event created. Mark attendance below.');
         redirect('/attendance.php?event_id=' . $event_id);
     }
 
@@ -36,6 +36,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
         flash('success', 'Attendance saved. Penalties updated.');
         redirect('/attendance.php?event_id=' . $event_id);
+    }
+
+    if ($action === 'edit_penalty') {
+        $attendance_id = (int)($_POST['attendance_id'] ?? 0);
+        $new_penalty   = (int)($_POST['new_penalty'] ?? 0);
+        if ($attendance_id < 1 || $new_penalty < 0) {
+            flash('error', 'Invalid penalty data.');
+            redirect('/attendance.php');
+        }
+        $row = dbQueryOne('SELECT user_id FROM attendance WHERE id = ?', [$attendance_id]);
+        if (!$row) { flash('error', 'Attendance record not found.'); redirect('/attendance.php'); }
+        dbExecute('UPDATE attendance SET penalty_points = ? WHERE id = ?', [$new_penalty, $attendance_id]);
+        recomputePenaltySummary($row['user_id']);
+        flash('success', 'Penalty updated.');
+        redirect('/attendance.php');
+    }
+
+    if ($action === 'batch_edit_penalties') {
+        $ids      = $_POST['attendance_id'] ?? [];
+        $penalties = $_POST['new_penalty'] ?? [];
+        $affected  = [];
+        foreach ($ids as $i => $aid) {
+            $aid = (int)$aid;
+            $pen = max(0, (int)($penalties[$i] ?? 0));
+            if ($aid < 1) continue;
+            $row = dbQueryOne('SELECT user_id FROM attendance WHERE id = ?', [$aid]);
+            if (!$row) continue;
+            dbExecute('UPDATE attendance SET penalty_points = ? WHERE id = ?', [$pen, $aid]);
+            $affected[] = $row['user_id'];
+        }
+        foreach (array_unique($affected) as $uid) {
+            recomputePenaltySummary($uid);
+        }
+        flash('success', 'Penalties updated.');
+        redirect('/attendance.php');
     }
 }
 
@@ -84,6 +119,15 @@ if (isOfficer()) {
          LEFT JOIN penalty_summary ps ON ps.user_id=u.id
          WHERE u.role="member" AND u.status="active"
          ORDER BY ps.total_points DESC, u.name'
+    );
+    // Also fetch individual attendance rows for penalty editing
+    $allAttendanceRows = dbQuery(
+        'SELECT a.id AS attendance_id, a.user_id, a.event_id, a.status, a.penalty_points,
+                u.name, e.title AS event_title, e.event_date
+         FROM attendance a
+         JOIN users u ON u.id = a.user_id
+         JOIN events e ON e.id = a.event_id
+         ORDER BY e.event_date DESC, u.name'
     );
 }
 
@@ -169,13 +213,13 @@ layout_head('Attendance', 'attendance');
 
 <?php else: ?>
 <!-- ── OFFICER/MODERATOR VIEW ─────────────────────────── -->
-<div class="row g-3 mb-3">
 
+<div class="row g-3 mb-3">
   <!-- Create Attendance Record -->
-  <div class="col-md-6">
+  <div class="col-md-5">
     <div class="card h-100">
       <div class="card-header">
-        <span class="card-title"><i class="bi bi-plus-circle me-2"></i>Create Attendance Record</span>
+        <span class="card-title"><i class="bi bi-plus-circle me-2"></i>Create New Attendance Record</span>
       </div>
       <form method="POST">
         <input type="hidden" name="action" value="create_event">
@@ -206,7 +250,7 @@ layout_head('Attendance', 'attendance');
           </div>
           <div class="alert alert-warning d-flex align-items-center gap-2 mt-3 mb-0 py-2 small">
             <i class="bi bi-info-circle-fill"></i>
-            Penalty: Present = 0 &nbsp;&middot;&nbsp; Late = 75 pts &nbsp;&middot;&nbsp; Absent = 150 pts
+            Present = 0 pts &nbsp;&middot;&nbsp; Late = 75 pts &nbsp;&middot;&nbsp; Absent = 150 pts
           </div>
         </div>
         <div class="p-3 pt-0">
@@ -218,28 +262,55 @@ layout_head('Attendance', 'attendance');
     </div>
   </div>
 
-  <!-- Select existing event -->
-  <div class="col-md-6">
+  <!-- Past Events List -->
+  <div class="col-md-7">
     <div class="card h-100">
       <div class="card-header">
-        <span class="card-title"><i class="bi bi-list-ul me-2"></i>Select Event to Edit</span>
+        <span class="card-title"><i class="bi bi-calendar-check me-2"></i>Past Events — Click to Edit Attendance</span>
       </div>
-      <div class="card-body">
-        <form method="GET">
-          <label class="form-label">Event</label>
-          <select name="event_id" class="form-control" onchange="this.form.submit()">
-            <option value="">— Select event —</option>
-            <?php foreach ($events as $ev): ?>
-            <option value="<?= $ev['id'] ?>" <?= $selectedEvent===$ev['id']?'selected':'' ?>>
-              <?= h($ev['title']) ?> (<?= formatDate($ev['event_date']) ?>)
-            </option>
+      <?php if (!$events): ?>
+      <div class="empty-state p-3"><p>No events yet. Create one first.</p></div>
+      <?php else: ?>
+      <div style="max-height:280px;overflow-y:auto">
+        <table class="table table-hover mb-0" style="font-size:.85rem">
+          <thead style="position:sticky;top:0;background:#f8f9fa;z-index:1">
+            <tr>
+              <th style="padding:.5rem .85rem;font-size:.78rem;text-transform:uppercase;letter-spacing:.4px;color:var(--xu-navy);border-bottom:2px solid #e3e6ea">Event</th>
+              <th style="padding:.5rem .85rem;font-size:.78rem;text-transform:uppercase;letter-spacing:.4px;color:var(--xu-navy);border-bottom:2px solid #e3e6ea">Date</th>
+              <th style="padding:.5rem .85rem;font-size:.78rem;text-transform:uppercase;letter-spacing:.4px;color:var(--xu-navy);border-bottom:2px solid #e3e6ea">Type</th>
+              <th style="padding:.5rem .85rem;font-size:.78rem;text-transform:uppercase;letter-spacing:.4px;color:var(--xu-navy);border-bottom:2px solid #e3e6ea"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <?php foreach ($events as $ev):
+              $isPast = strtotime($ev['event_date']) < strtotime(date('Y-m-d'));
+            ?>
+            <tr class="<?= $selectedEvent===$ev['id'] ? 'table-primary' : '' ?>"
+                style="<?= $isPast ? 'opacity:.65' : '' ?>">
+              <td style="padding:.5rem .85rem;border-bottom:1px solid #f0f1f3;vertical-align:middle">
+                <strong><?= h($ev['title']) ?></strong>
+                <?= $ev['location'] ? '<br><span class="text-muted" style="font-size:.73rem">'.h($ev['location']).'</span>' : '' ?>
+              </td>
+              <td style="padding:.5rem .85rem;border-bottom:1px solid #f0f1f3;vertical-align:middle;white-space:nowrap">
+                <?= formatDate($ev['event_date']) ?>
+              </td>
+              <td style="padding:.5rem .85rem;border-bottom:1px solid #f0f1f3;vertical-align:middle">
+                <span class="badge bg-secondary"><?= h(ucfirst($ev['type'])) ?></span>
+              </td>
+              <td style="padding:.5rem .85rem;border-bottom:1px solid #f0f1f3;vertical-align:middle">
+                <a href="?event_id=<?= $ev['id'] ?>" class="btn btn-xs <?= $selectedEvent===$ev['id'] ? 'btn-primary' : 'btn-outline-secondary' ?>">
+                  <i class="bi bi-<?= $selectedEvent===$ev['id'] ? 'check2-square' : 'pencil-square' ?>"></i>
+                  <?= $selectedEvent===$ev['id'] ? 'Editing' : 'Edit' ?>
+                </a>
+              </td>
+            </tr>
             <?php endforeach; ?>
-          </select>
-        </form>
+          </tbody>
+        </table>
       </div>
+      <?php endif; ?>
     </div>
   </div>
-
 </div>
 
 <!-- Mark Attendance -->
@@ -249,10 +320,15 @@ layout_head('Attendance', 'attendance');
     <span class="card-title">
       <i class="bi bi-check2-square me-2"></i>Mark Attendance — <?= h($eventData['title']) ?>
     </span>
-    <span class="text-muted small">
-      <?= formatDate($eventData['event_date']) ?>
-      <?= $eventData['location'] ? ' · '.h($eventData['location']) : '' ?>
-    </span>
+    <div class="d-flex align-items-center gap-2">
+      <span class="text-muted small">
+        <?= formatDate($eventData['event_date']) ?>
+        <?= $eventData['location'] ? ' · '.h($eventData['location']) : '' ?>
+      </span>
+      <a href="/attendance.php" class="btn btn-sm btn-outline-secondary">
+        <i class="bi bi-x-lg"></i> Close
+      </a>
+    </div>
   </div>
   <form method="POST">
     <input type="hidden" name="action" value="bulk_save">
@@ -260,7 +336,18 @@ layout_head('Attendance', 'attendance');
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Member</th><th>Instrument</th><th>Year</th><th>Status</th><th>Penalty Preview</th></tr>
+          <tr>
+            <th>Member</th><th>Instrument</th><th>Year</th>
+            <th>
+              Status
+              <div class="d-flex gap-1 mt-1">
+                <button type="button" class="btn btn-xs btn-outline-secondary" onclick="setAllStatus('present')">All Present</button>
+                <button type="button" class="btn btn-xs btn-outline-warning" onclick="setAllStatus('late')">All Late</button>
+                <button type="button" class="btn btn-xs btn-outline-danger" onclick="setAllStatus('absent')">All Absent</button>
+              </div>
+            </th>
+            <th>Penalty Preview</th>
+          </tr>
         </thead>
         <tbody>
           <?php foreach ($members as $m): ?>
@@ -269,8 +356,8 @@ layout_head('Attendance', 'attendance');
             <td><?= h($m['instrument']??'—') ?></td>
             <td class="small text-muted"><?= h($m['year_level']??'—') ?></td>
             <td>
-              <select name="status[<?= $m['id'] ?>]" class="form-control" style="width:120px"
-                id="sel_<?= $m['id'] ?>" onchange="updatePts(<?= $m['id'] ?>)">
+              <select name="status[<?= $m['id'] ?>]" class="form-control att-status-sel" style="width:120px"
+                id="sel_<?= $m['id'] ?>" data-uid="<?= $m['id'] ?>" onchange="updatePts(<?= $m['id'] ?>)">
                 <?php foreach (['present','late','absent'] as $st): ?>
                 <option value="<?= $st ?>" <?= ($m['att_status']===$st)?'selected':'' ?>><?= ucfirst($st) ?></option>
                 <?php endforeach; ?>
@@ -298,6 +385,11 @@ layout_head('Attendance', 'attendance');
     <?php endif; ?>
   </form>
 </div>
+<?php elseif (!$selectedEvent): ?>
+<div class="alert alert-info d-flex align-items-center gap-2">
+  <i class="bi bi-info-circle-fill"></i>
+  Select an event from the table above to mark or edit attendance.
+</div>
 <?php endif; ?>
 
 <!-- Penalty Summary Table -->
@@ -311,7 +403,7 @@ layout_head('Attendance', 'attendance');
   <div class="table-wrap">
     <table>
       <thead>
-        <tr><th>Member</th><th>Instrument</th><th>Present</th><th>Late</th><th>Absent</th><th>Total Penalty</th></tr>
+        <tr><th>Member</th><th>Instrument</th><th>Present</th><th>Late</th><th>Absent</th><th>Total Penalty</th><th>Actions</th></tr>
       </thead>
       <tbody>
         <?php foreach ($penaltySummary as $p): ?>
@@ -329,13 +421,44 @@ layout_head('Attendance', 'attendance');
               <?= $p['total_points'] ?>
             </span>
           </td>
+          <td>
+            <button class="btn btn-xs btn-outline-secondary"
+                    onclick="openEditPenalty(<?= $p['id'] ?>, <?= h(json_encode($p['name'])) ?>)">
+              <i class="bi bi-pencil me-1"></i>Edit Penalty
+            </button>
+          </td>
         </tr>
         <?php endforeach; ?>
         <?php if (!$penaltySummary): ?>
-        <tr><td colspan="6"><div class="empty-state p-3"><p>No data yet.</p></div></td></tr>
+        <tr><td colspan="7"><div class="empty-state p-3"><p>No data yet.</p></div></td></tr>
         <?php endif; ?>
       </tbody>
     </table>
+  </div>
+</div>
+
+<!-- Edit Penalty Modal -->
+<div class="xu-modal-overlay" id="xumodalEditPenalty">
+  <div class="xu-modal" style="max-width:500px">
+    <form method="POST" id="batchPenaltyForm">
+      <input type="hidden" name="action" value="batch_edit_penalties">
+      <div class="xu-modal-header">
+        <span class="xu-modal-title"><i class="bi bi-pencil-square me-2"></i>Edit Penalties — <span id="penaltyMemberName"></span></span>
+        <button type="button" class="xu-modal-close" onclick="closeModal(this)"><i class="bi bi-x-lg"></i></button>
+      </div>
+      <div class="xu-modal-body">
+        <p class="text-muted small mb-3">Adjust penalty points per attendance record, then click <strong>Save All</strong>.</p>
+        <div id="penaltyAttendanceList">
+          <!-- Filled dynamically -->
+        </div>
+      </div>
+      <div class="xu-modal-footer">
+        <button type="button" class="btn btn-outline" onclick="closeModal(this)">Cancel</button>
+        <button type="submit" class="btn btn-primary">
+          <i class="bi bi-floppy me-1"></i>Save All
+        </button>
+      </div>
+    </form>
   </div>
 </div>
 
@@ -350,6 +473,49 @@ function updatePts(uid) {
   const pts = penMap[sel.value] ?? 0;
   el.textContent = pts;
   el.className = 'fw-bold ' + (pts === 0 ? 'text-green' : pts === 75 ? 'text-yellow' : 'text-red');
+}
+function setAllStatus(status) {
+  document.querySelectorAll('.att-status-sel').forEach(sel => {
+    sel.value = status;
+    updatePts(parseInt(sel.getAttribute('data-uid')));
+  });
+}
+
+// All attendance rows indexed by user_id
+const allAttRows = <?= isset($allAttendanceRows) ? json_encode($allAttendanceRows) : '[]' ?>;
+
+function openEditPenalty(userId, memberName) {
+  document.getElementById('penaltyMemberName').textContent = memberName;
+  const rows = allAttRows.filter(r => parseInt(r.user_id) === parseInt(userId));
+  const container = document.getElementById('penaltyAttendanceList');
+  if (!rows.length) {
+    container.innerHTML = '<p class="text-muted small">No attendance records for this member.</p>';
+  } else {
+    container.innerHTML = rows.map((r, i) => `
+      <div class="border rounded p-2 mb-2 d-flex justify-content-between align-items-center gap-2">
+        <div>
+          <strong>${escHtml(r.event_title)}</strong>
+          <div class="text-muted small">${escHtml(r.event_date)} &middot; ${ucfirst(r.status)}</div>
+        </div>
+        <div class="d-flex align-items-center gap-2 flex-shrink-0">
+          <input type="hidden" name="attendance_id[]" value="${r.attendance_id}">
+          <input type="number" name="new_penalty[]" class="form-control form-control-sm" style="width:85px"
+                 value="${r.penalty_points}" min="0" step="1" required>
+          <span class="text-muted small">pts</span>
+        </div>
+      </div>
+    `).join('');
+  }
+  openModal('xumodalEditPenalty');
+}
+
+function escHtml(str) {
+  const d = document.createElement('div');
+  d.appendChild(document.createTextNode(String(str)));
+  return d.innerHTML;
+}
+function ucfirst(str) {
+  return str ? str.charAt(0).toUpperCase() + str.slice(1) : str;
 }
 </script>
 

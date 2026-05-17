@@ -16,7 +16,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $exists = dbQueryOne('SELECT id FROM school_years WHERE label = ?', [$label]);
         if ($exists) { flash('error', 'School year already exists.'); redirect('/scholarships.php'); }
         $sy_id = dbInsert('INSERT INTO school_years (label, created_by) VALUES (?,?)', [$label, $user['id']]);
-        foreach (['1st Semester','2nd Semester','Summer'] as $term) {
+        foreach (['1st Semester','2nd Semester','Intersession'] as $term) {
             dbInsert('INSERT INTO scholarship_terms (school_year_id, term) VALUES (?,?)', [$sy_id, $term]);
         }
         flash('success', "School year $label created with 3 terms.");
@@ -30,7 +30,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect('/scholarships.php');
     }
 
+    if ($action === 'batch_update') {
+        // Batch update all scholarship statuses for a term at once
+        $term_id  = (int)($_POST['term_id'] ?? 0);
+        $statuses = $_POST['status'] ?? []; // [user_id => status]
+        $scholarship_ids = $_POST['scholarship_id'] ?? []; // [user_id => scholarship_id]
+        $allowed = ['Full Scholar','Half Scholar','Not Scholar'];
+        foreach ($statuses as $uid => $status) {
+            $uid = (int)$uid;
+            $sid = (int)($scholarship_ids[$uid] ?? 0);
+            if (!in_array($status, $allowed)) continue;
+            if ($sid > 0) {
+                dbExecute('UPDATE scholarships SET status=?,updated_by=?,updated_at=NOW() WHERE id=?',
+                    [$status, $user['id'], $sid]);
+            } else {
+                dbExecute('INSERT INTO scholarships (term_id,user_id,status,updated_by) VALUES (?,?,?,?)
+                           ON DUPLICATE KEY UPDATE status=VALUES(status),updated_by=VALUES(updated_by),updated_at=NOW()',
+                    [$term_id, $uid, $status, $user['id']]);
+            }
+        }
+        flash('success', 'Scholarship statuses saved.');
+        redirect('/scholarships.php');
+    }
+
     if ($action === 'update_status') {
+        // Keep single-update fallback for compatibility
         $scholarship_id = (int)($_POST['scholarship_id'] ?? 0);
         $term_id        = (int)($_POST['term_id'] ?? 0);
         $uid            = (int)($_POST['user_id'] ?? 0);
@@ -55,7 +79,10 @@ $schoolYears = dbQuery('SELECT sy.*, u.name AS creator FROM school_years sy JOIN
 
 $yearsData = [];
 foreach ($schoolYears as $sy) {
-    $terms = dbQuery('SELECT * FROM scholarship_terms WHERE school_year_id=? ORDER BY FIELD(term,"1st Semester","2nd Semester","Summer")', [$sy['id']]);
+    $terms = dbQuery(
+        'SELECT * FROM scholarship_terms WHERE school_year_id=? ORDER BY FIELD(term,"1st Semester","2nd Semester","Intersession")',
+        [$sy['id']]
+    );
     $termsData = [];
     foreach ($terms as $t) {
         if (isOfficer()) {
@@ -104,7 +131,7 @@ layout_head('Scholarships', 'scholarships');
 <div class="d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4">
   <h2 class="mb-0" style="color:var(--navy)"><i class="bi bi-award me-2"></i>Scholarship Records</h2>
   <?php if (isOfficer()): ?>
-  <button class="btn btn-primary btn-sm" data-modal="modalSY">
+  <button class="btn btn-primary btn-sm" onclick="openModal('xumodalSY')">
     <i class="bi bi-plus-lg me-1"></i> Create School Year
   </button>
   <?php else: ?>
@@ -170,45 +197,62 @@ layout_head('Scholarships', 'scholarships');
             <div class="accordion-body p-0">
               <?php if (!$records): ?>
               <div class="empty-state p-3"><p>No members found.</p></div>
+              <?php elseif (isOfficer()): ?>
+              <!-- Officer: batch form per term -->
+              <form method="POST">
+                <input type="hidden" name="action" value="batch_update">
+                <input type="hidden" name="term_id" value="<?= $t['id'] ?>">
+                <div class="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Member</th>
+                        <th>Instrument</th><th>Year</th>
+                        <th>Scholarship Status</th>
+                        <th>Updated By</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php foreach ($records as $r): ?>
+                      <tr>
+                        <input type="hidden" name="scholarship_id[<?= $r['user_id'] ?>]" value="<?= $r['scholarship_id'] ?>">
+                        <td><strong><?= h($r['name']) ?></strong></td>
+                        <td><?= h($r['instrument']??'—') ?></td>
+                        <td class="small text-muted"><?= h($r['year_level']??'—') ?></td>
+                        <td>
+                          <select name="status[<?= $r['user_id'] ?>]" class="form-control" style="width:145px">
+                            <option value="Full Scholar"  <?= $r['status']==='Full Scholar' ?'selected':'' ?>>Full Scholar</option>
+                            <option value="Half Scholar"  <?= $r['status']==='Half Scholar' ?'selected':'' ?>>Half Scholar</option>
+                            <option value="Not Scholar"   <?= $r['status']==='Not Scholar'  ?'selected':'' ?>>Not Scholar</option>
+                          </select>
+                        </td>
+                        <td class="small text-muted"><?= h($r['updated_by_name']??'—') ?></td>
+                      </tr>
+                      <?php endforeach; ?>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="p-3 border-top">
+                  <button type="submit" class="btn btn-primary btn-sm">
+                    <i class="bi bi-floppy me-1"></i>Save Changes
+                  </button>
+                </div>
+              </form>
               <?php else: ?>
+              <!-- Member: read-only view -->
               <div class="table-wrap">
                 <table>
                   <thead>
                     <tr>
                       <th>Member</th>
-                      <?php if (isOfficer()): ?><th>Instrument</th><th>Year</th><?php endif; ?>
                       <th>Scholarship Status</th>
-                      <?php if (isOfficer()): ?><th>Updated By</th><th>Action</th><?php endif; ?>
                     </tr>
                   </thead>
                   <tbody>
                     <?php foreach ($records as $r): ?>
                     <tr>
                       <td><strong><?= h($r['name']) ?></strong></td>
-                      <?php if (isOfficer()): ?>
-                      <td><?= h($r['instrument']??'—') ?></td>
-                      <td class="small text-muted"><?= h($r['year_level']??'—') ?></td>
-                      <?php endif; ?>
                       <td><?= scholarshipBadge($r['status']) ?></td>
-                      <?php if (isOfficer()): ?>
-                      <td class="small text-muted"><?= h($r['updated_by_name']??'—') ?></td>
-                      <td>
-                        <form method="POST" class="d-flex gap-2 align-items-center">
-                          <input type="hidden" name="action" value="update_status">
-                          <input type="hidden" name="scholarship_id" value="<?= $r['scholarship_id'] ?>">
-                          <input type="hidden" name="term_id" value="<?= $t['id'] ?>">
-                          <input type="hidden" name="user_id" value="<?= $r['user_id'] ?>">
-                          <select name="status" class="form-control" style="width:140px">
-                            <option value="Full Scholar"  <?= $r['status']==='Full Scholar' ?'selected':'' ?>>Full Scholar</option>
-                            <option value="Half Scholar"  <?= $r['status']==='Half Scholar' ?'selected':'' ?>>Half Scholar</option>
-                            <option value="Not Scholar"   <?= $r['status']==='Not Scholar'  ?'selected':'' ?>>Not Scholar</option>
-                          </select>
-                          <button type="submit" class="btn btn-xs btn-primary">
-                            <i class="bi bi-floppy"></i> Save
-                          </button>
-                        </form>
-                      </td>
-                      <?php endif; ?>
                     </tr>
                     <?php endforeach; ?>
                   </tbody>
@@ -229,23 +273,23 @@ layout_head('Scholarships', 'scholarships');
 </div>
 
 <?php if (isOfficer()): ?>
-<div class="modal-overlay" id="modalSY">
-  <div class="modal">
-    <div class="modal-header">
-      <span class="modal-title">Create School Year</span>
-      <button class="modal-close" data-modal-close><i class="bi bi-x-lg"></i></button>
+<div class="xu-modal-overlay" id="xumodalSY">
+  <div class="xu-modal">
+    <div class="xu-modal-header">
+      <span class="xu-modal-title">Create School Year</span>
+      <button class="xu-modal-close" onclick="closeModal(this)"><i class="bi bi-x-lg"></i></button>
     </div>
     <form method="POST">
       <input type="hidden" name="action" value="create_school_year">
-      <div class="modal-body">
+      <div class="xu-modal-body">
         <div class="mb-3">
           <label class="form-label">School Year Label *</label>
           <input name="label" class="form-control" placeholder="e.g. 2024-2025" required>
-          <div class="form-text text-muted">Auto-creates 1st Semester, 2nd Semester, and Summer terms.</div>
+          <div class="form-text text-muted">Auto-creates 1st Semester, 2nd Semester, and Intersession terms.</div>
         </div>
       </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-outline" data-modal-close>Cancel</button>
+      <div class="xu-modal-footer">
+        <button type="button" class="btn btn-outline" onclick="closeModal(this)">Cancel</button>
         <button type="submit" class="btn btn-primary">
           <i class="bi bi-plus-lg me-1"></i>Create
         </button>

@@ -1,8 +1,6 @@
 -- XUBand Digital Filing System Schema v2
 -- Xavier University Band
 
-CREATE DATABASE IF NOT EXISTS xuband CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE xuband;
 
 -- Users
 CREATE TABLE IF NOT EXISTS users (
@@ -17,9 +15,13 @@ CREATE TABLE IF NOT EXISTS users (
     contact_number VARCHAR(20) DEFAULT NULL,
     status ENUM('active','inactive') NOT NULL DEFAULT 'active',
     profile_notes TEXT DEFAULT NULL,
+    avatar_path VARCHAR(255) DEFAULT NULL,
+    scholarship_status ENUM('Not Scholar','Half Scholar','Full Scholar') NOT NULL DEFAULT 'Not Scholar',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
+
+-- NOTE: avatar_path and scholarship_status migration handled by setup.php via INFORMATION_SCHEMA check
 
 -- Events
 CREATE TABLE IF NOT EXISTS events (
@@ -69,11 +71,11 @@ CREATE TABLE IF NOT EXISTS school_years (
     FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE CASCADE
 );
 
--- Scholarship Terms (auto-created: 1st Sem, 2nd Sem, Summer per school year)
+-- Scholarship Terms (auto-created: 1st Sem, 2nd Sem, Intersession per school year)
 CREATE TABLE IF NOT EXISTS scholarship_terms (
     id INT AUTO_INCREMENT PRIMARY KEY,
     school_year_id INT NOT NULL,
-    term ENUM('1st Semester','2nd Semester','Summer') NOT NULL,
+    term ENUM('1st Semester','2nd Semester','Intersession') NOT NULL,
     UNIQUE KEY unique_term (school_year_id, term),
     FOREIGN KEY (school_year_id) REFERENCES school_years(id) ON DELETE CASCADE
 );
@@ -171,7 +173,7 @@ INSERT INTO announcements (title, body, created_by, pinned) VALUES
 
 -- Sample school year with all 3 terms
 INSERT INTO school_years (label, created_by) VALUES ('2024-2025', 1);
-INSERT INTO scholarship_terms (school_year_id, term) VALUES (1,'1st Semester'),(1,'2nd Semester'),(1,'Summer');
+INSERT INTO scholarship_terms (school_year_id, term) VALUES (1,'1st Semester'),(1,'2nd Semester'),(1,'Intersession');
 
 -- Sample scholarships
 INSERT INTO scholarships (term_id, user_id, status, updated_by) VALUES
