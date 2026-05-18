@@ -13,10 +13,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (!$email || !$password) {
         $error = 'Please enter your email and password.';
-    } elseif (login($email, $password)) {
-        redirect('/dashboard.php');
     } else {
-        $error = 'Invalid email or password.';
+        $result = login($email, $password);
+        if ($result === true) {
+            redirect('/dashboard.php');
+        } elseif ($result === 'pending') {
+            $error = 'Your account is pending approval. Please wait for a moderator to approve your registration.';
+        } else {
+            $error = 'Invalid email or password.';
+        }
     }
 }
 ?>
@@ -61,6 +66,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <i class="bi bi-box-arrow-in-right me-1"></i> Sign In
       </button>
     </form>
+    <div class="text-center mt-3" style="font-size:.85rem">
+      Don't have an account? <a href="/register.php">Sign up</a>
+    </div>
   </div>
 </div>
 <script src="/assets/js/bootstrap.bundle.min.js"></script>

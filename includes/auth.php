@@ -16,20 +16,24 @@ function startSession(): void {
     }
 }
 
-function login(string $email, string $password): bool {
-    $user = dbQueryOne('SELECT * FROM users WHERE email = ? AND status = "active"', [trim($email)]);
+function login(string $email, string $password): bool|string {
+    $user = dbQueryOne('SELECT * FROM users WHERE email = ?', [trim($email)]);
     if (!$user) return false;
 
-    // Normalize hash prefix: bcryptjs stores $2b$, PHP needs $2y$ (str_replace is safe here)
-    $hash = str_replace('$2b$', '$2y$', $user['password_hash']);
+    // Normalize hash prefix: bcryptjs stores $2b$, PHP expects $2y$
+    $hash = str_replace('$2b$', '$2y$', $user['password']);
 
     if (!password_verify($password, $hash)) return false;
 
+    if ($user['status'] === 'pending') return 'pending';
+    if ($user['status'] !== 'active')  return false;
+
+    startSession();
+    session_regenerate_id(true);
     $_SESSION['user_id']    = $user['id'];
     $_SESSION['user_name']  = $user['name'];
     $_SESSION['user_role']  = $user['role'];
     $_SESSION['user_email'] = $user['email'];
-    session_regenerate_id(true);
     return true;
 }
 
